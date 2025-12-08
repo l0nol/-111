@@ -8,13 +8,13 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { AppState, AppSettings, InputMode } from '../App';
 
-// Configuration - Optimized counts for better performance
+// Configuration - Further optimized for mobile performance
 const CONFIG = {
-  goldCount: 600,     // Reduced from 800
-  silverCount: 600,   // Reduced from 800
-  gemCount: 300,      // Reduced from 400
-  emeraldCount: 300,  // Reduced from 400
-  dustCount: 800,     // Reduced from 1200
+  goldCount: 500,     
+  silverCount: 500,   
+  gemCount: 200,      
+  emeraldCount: 200,  
+  dustCount: 600,     
   treeHeight: 75,
   maxRadius: 30
 };
@@ -108,6 +108,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
   // MediaPipe Refs
   const handLandmarkerRef = useRef<HandLandmarker | null>(null);
   const lastPredictionTimeRef = useRef(0);
+  const lastVideoTimeRef = useRef(-1);
+
   const gestureStateRef = useRef({
     isPinching: false,
     victoryTimer: 0,
@@ -357,22 +359,52 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     };
 
     const createMaterialsAndMeshes = () => {
-        const goldMat = new THREE.MeshPhysicalMaterial({ color: 0xffaa00, metalness: 1.0, roughness: 0.15, clearcoat: 1.0, emissive: 0xaa5500, emissiveIntensity: 0.1 });
+        // OPTIMIZATION: Use Standard Material instead of Physical for performance
+        const goldMat = new THREE.MeshStandardMaterial({ 
+            color: 0xffaa00, 
+            metalness: 1.0, 
+            roughness: 0.2, 
+            emissive: 0xaa5500, 
+            emissiveIntensity: 0.1 
+        });
         goldMat.userData = { origEmissive: 0xaa5500, origEmissiveIntensity: 0.1 };
 
-        const silverMat = new THREE.MeshPhysicalMaterial({ color: 0xeeeeee, metalness: 0.9, roughness: 0.2, clearcoat: 1.0, emissive: 0x222222, emissiveIntensity: 0.1 });
+        const silverMat = new THREE.MeshStandardMaterial({ 
+            color: 0xeeeeee, 
+            metalness: 0.9, 
+            roughness: 0.2, 
+            emissive: 0x222222, 
+            emissiveIntensity: 0.1 
+        });
         silverMat.userData = { origEmissive: 0x222222, origEmissiveIntensity: 0.1 };
 
-        const gemMat = new THREE.MeshPhysicalMaterial({ color: 0xff0044, metalness: 0.1, roughness: 0.0, transmission: 0.5, thickness: 1.0, emissive: 0x440011, emissiveIntensity: 0.3 });
+        // OPTIMIZATION: Use transparent standard material instead of transmission (glass)
+        const gemMat = new THREE.MeshStandardMaterial({ 
+            color: 0xff0044, 
+            metalness: 0.1, 
+            roughness: 0.1, 
+            transparent: true,
+            opacity: 0.8,
+            emissive: 0x440011, 
+            emissiveIntensity: 0.3 
+        });
         gemMat.userData = { origEmissive: 0x440011, origEmissiveIntensity: 0.3 };
 
-        const emeraldMat = new THREE.MeshPhysicalMaterial({ color: 0x00aa55, metalness: 0.2, roughness: 0.1, transmission: 0.4, thickness: 1.5, emissive: 0x002211, emissiveIntensity: 0.2 });
+        const emeraldMat = new THREE.MeshStandardMaterial({ 
+            color: 0x00aa55, 
+            metalness: 0.2, 
+            roughness: 0.1, 
+            transparent: true,
+            opacity: 0.8,
+            emissive: 0x002211, 
+            emissiveIntensity: 0.2 
+        });
         emeraldMat.userData = { origEmissive: 0x002211, origEmissiveIntensity: 0.2 };
 
-        const sphereGeo = new THREE.SphereGeometry(0.7, 16, 16);
+        const sphereGeo = new THREE.SphereGeometry(0.7, 12, 12); // Reduced segments
         const boxGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
         const diamondGeo = new THREE.OctahedronGeometry(0.8, 0);
-        const coneGeo = new THREE.ConeGeometry(0.5, 1.2, 8);
+        const coneGeo = new THREE.ConeGeometry(0.5, 1.2, 6); // Reduced segments
 
         createInstancedMesh(sphereGeo, goldMat, CONFIG.goldCount, logicDataRef.current.gold, 'gold');
         createInstancedMesh(boxGeo, silverMat, CONFIG.silverCount, logicDataRef.current.silver, 'silver');
@@ -381,7 +413,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
 
         const star = new THREE.Mesh(
             new THREE.OctahedronGeometry(3.0, 0), 
-            new THREE.MeshPhysicalMaterial({ color: 0xffffff, metalness:0.8, roughness:0, emissive:0xffffee, emissiveIntensity:1 })
+            new THREE.MeshStandardMaterial({ color: 0xffffff, metalness:0.8, roughness:0.2, emissive:0xffffee, emissiveIntensity:1 })
         );
         star.userData = { treePos: new THREE.Vector3(0, CONFIG.treeHeight/2 + 2, 0), scatterPos: new THREE.Vector3(0, 60, 0) };
         star.position.copy(star.userData.treePos);
@@ -412,14 +444,14 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     const createStarField = () => {
         const geo = new THREE.BufferGeometry();
         const pos = [];
-        for(let i=0; i<1000; i++) pos.push((Math.random()-0.5)*1000, (Math.random()-0.5)*1000, (Math.random()-0.5)*1000);
+        for(let i=0; i<800; i++) pos.push((Math.random()-0.5)*1000, (Math.random()-0.5)*1000, (Math.random()-0.5)*1000);
         geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
         const stars = new THREE.Points(geo, new THREE.PointsMaterial({color: 0x888888, size: 1.2, transparent: true, opacity: 0.5}));
         scene.add(stars);
     };
 
     const createRibbonWithMorph = () => {
-        const spiralPoints: THREE.Vector3[] = [];
+        const spiralPoints = [];
         const turns = 5;
         const height = CONFIG.treeHeight + 10;
         const steps = 300; 
@@ -432,7 +464,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             spiralPoints.push(new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r));
         }
 
-        const framePoints: THREE.Vector3[] = [];
+        const framePoints = [];
         const w = 90; 
         const topY = 40;
         const botY = -30;
@@ -497,7 +529,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             ctx.fillText(text, 200, 100);
             
             const imageData = ctx.getImageData(0, 0, 400, 200).data;
-            const points: THREE.Vector3[] = [];
+            const points = [];
             for (let y = 0; y < 200; y += 3) {
                 for (let x = 0; x < 400; x += 3) {
                     if (imageData[(y * 400 + x) * 4 + 3] > 128) {
@@ -524,167 +556,151 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const video = videoRef.current;
         if (video.readyState < 2 || video.videoWidth === 0) return;
 
-        // PERFORMANCE: Throttle Prediction (Max ~20 FPS)
+        // Throttle prediction to ~10 FPS (100ms) to save CPU/GPU for rendering
         const now = Date.now();
-        if (now - lastPredictionTimeRef.current < 50) return; 
+        if (now - lastPredictionTimeRef.current < 100) return;
         lastPredictionTimeRef.current = now;
 
-        try {
-            const result = handLandmarkerRef.current.detectForVideo(video, now);
-            const canvas = document.getElementById('skeleton-canvas') as HTMLCanvasElement;
-            if (canvas && canvas.getContext('2d')) {
-                const ctx = canvas.getContext('2d')!;
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
-                if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
-                
-                if (result.landmarks && result.landmarks.length > 0) {
-                    // TAKE THE FIRST HAND DETECTED (One Hand Master)
-                    const landmarks = result.landmarks[0]; 
+        if (video.currentTime !== lastVideoTimeRef.current) {
+            lastVideoTimeRef.current = video.currentTime;
+            
+            try {
+                const result = handLandmarkerRef.current.detectForVideo(video, now);
+                const canvas = document.getElementById('skeleton-canvas') as HTMLCanvasElement;
+                if (canvas && canvas.getContext('2d')) {
+                    const ctx = canvas.getContext('2d')!;
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+                    if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
+                    
+                    if (result.landmarks && result.landmarks.length > 0) {
+                        const landmarks = result.landmarks[0]; 
 
-                    // 1. Draw Skeleton
-                    ctx.lineWidth = 3; ctx.strokeStyle = '#FFD700'; ctx.fillStyle = '#FF4400';
-                    const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
-                    ctx.beginPath();
-                    connections.forEach(([s, e]) => {
-                        ctx.moveTo(landmarks[s].x * canvas.width, landmarks[s].y * canvas.height);
-                        ctx.lineTo(landmarks[e].x * canvas.width, landmarks[e].y * canvas.height);
-                    });
-                    ctx.stroke();
+                        ctx.lineWidth = 3; ctx.strokeStyle = '#FFD700'; ctx.fillStyle = '#FF4400';
+                        const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+                        ctx.beginPath();
+                        connections.forEach(([s, e]) => {
+                            ctx.moveTo(landmarks[s].x * canvas.width, landmarks[s].y * canvas.height);
+                            ctx.lineTo(landmarks[e].x * canvas.width, landmarks[e].y * canvas.height);
+                        });
+                        ctx.stroke();
 
-                    // 2. Geometry Helpers
-                    const dist = (i1: number, i2: number) => {
-                        const dx = landmarks[i1].x - landmarks[i2].x;
-                        const dy = landmarks[i1].y - landmarks[i2].y;
-                        const dz = landmarks[i1].z - landmarks[i2].z;
-                        return Math.sqrt(dx*dx + dy*dy + dz*dz);
-                    };
-                    const isExt = (tip: number, pip: number) => dist(0, tip) > dist(0, pip) * 1.1;
+                        const dist = (i1: number, i2: number) => {
+                            const dx = landmarks[i1].x - landmarks[i2].x;
+                            const dy = landmarks[i1].y - landmarks[i2].y;
+                            const dz = landmarks[i1].z - landmarks[i2].z;
+                            return Math.sqrt(dx*dx + dy*dy + dz*dz);
+                        };
+                        const isExt = (tip: number, pip: number) => dist(0, tip) > dist(0, pip) * 1.1;
 
-                    const thumbOpen = isExt(4, 2);
-                    const indexOpen = isExt(8, 6);
-                    const midOpen = isExt(12, 10);
-                    const ringOpen = isExt(16, 14);
-                    const pinkyOpen = isExt(20, 18);
-                    const extendedCount = (thumbOpen?1:0)+(indexOpen?1:0)+(midOpen?1:0)+(ringOpen?1:0)+(pinkyOpen?1:0);
+                        const thumbOpen = isExt(4, 2);
+                        const indexOpen = isExt(8, 6);
+                        const midOpen = isExt(12, 10);
+                        const ringOpen = isExt(16, 14);
+                        const pinkyOpen = isExt(20, 18);
+                        const extendedCount = (thumbOpen?1:0)+(indexOpen?1:0)+(midOpen?1:0)+(ringOpen?1:0)+(pinkyOpen?1:0);
 
-                    // 3. Classify Gestures
-                    // Relaxed Fist: Ignore thumb (often unreliable in fist). Check if 4 fingers are closed.
-                    const isFist = !indexOpen && !midOpen && !ringOpen && !pinkyOpen;
-                    const isOpen = extendedCount === 5;
-                    const isPointing = indexOpen && !midOpen && !ringOpen && !pinkyOpen;
-                    const isVictory = indexOpen && midOpen && !ringOpen && !pinkyOpen;
-                    const isThreeFinger = indexOpen && midOpen && ringOpen && !pinkyOpen;
-                    const pinchDist = dist(4, 8);
-                    const isPinch = pinchDist < 0.05;
+                        const isFist = !indexOpen && !midOpen && !ringOpen && !pinkyOpen;
+                        const isOpen = extendedCount === 5;
+                        const isPointing = indexOpen && !midOpen && !ringOpen && !pinkyOpen;
+                        const isVictory = indexOpen && midOpen && !ringOpen && !pinkyOpen;
+                        const isThreeFinger = indexOpen && midOpen && ringOpen && !pinkyOpen;
+                        const pinchDist = dist(4, 8);
+                        const isPinch = pinchDist < 0.05;
 
-                    let status = "AI: ";
+                        let status = "AI: ";
 
-                    // 4. ZOOM (Only active when Pointing)
-                    if (isPointing) {
-                        status += "☝️ Point (Zoom)";
-                        const handSize = dist(0, 12); // Wrist to Mid Tip
-                        if (cameraRef.current) {
-                            // Larger hand (closer) = Zoom In (small Z)
-                            // Smaller hand (farther) = Zoom Out (large Z)
-                            let targetZ = 250 - (handSize * 600);
-                            targetZ = Math.max(30, Math.min(220, targetZ));
-                            cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, targetZ, 0.05);
-                        }
-                    }
-
-                    // 5. ROTATION (Virtual Joystick using Fist)
-                    if (isFist) {
-                        status += "✊ Fist (Spin)";
-                        if (appStateRef.current !== AppState.TREE) setAppState(AppState.TREE);
-                        
-                        // Virtual Joystick Logic
-                        // Center of screen (0.5) = 0 velocity
-                        const palmX = landmarks[9].x; 
-                        const deviation = palmX - 0.5; // -0.5 to 0.5
-                        
-                        // Deadzone
-                        if (Math.abs(deviation) > 0.05) {
-                            rotationVelocityRef.current = -deviation * 0.2; // Speed multiplier
-                            if (mainGroupRef.current) mainGroupRef.current.rotation.y += rotationVelocityRef.current;
-                        }
-                    } 
-                    // 6. SCATTER (Strict 5 Fingers)
-                    else if (isOpen) {
-                        status += "🖐 Open (Scatter)";
-                        if (appStateRef.current !== AppState.SCATTER) setAppState(AppState.SCATTER);
-                    }
-                    // 7. PINCH (Select - Only when Pointing or just pinch)
-                    else if (isPinch) {
-                            status += "👌 Pinch (Select)";
-                            if (!gestureStateRef.current.isPinching) {
-                                playBellSound();
-                                if (containerRef.current) {
-                                    const rect = containerRef.current.getBoundingClientRect();
-                                    // NOTE: Selfie mode mirror logic means X is flipped for interaction
-                                    const rawX = (landmarks[4].x + landmarks[8].x) / 2;
-                                    const rawY = (landmarks[4].y + landmarks[8].y) / 2;
-                                    // Flip X for logic mapping
-                                    const screenX = (1 - rawX) * rect.width + rect.left;
-                                    const screenY = rawY * rect.height + rect.top;
-                                    handlePhotoClick(screenX, screenY);
-                                }
+                        if (isPointing) {
+                            status += "☝️ Point (Zoom)";
+                            const handSize = dist(0, 12); 
+                            if (cameraRef.current) {
+                                let targetZ = 250 - (handSize * 600);
+                                targetZ = Math.max(30, Math.min(220, targetZ));
+                                cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, targetZ, 0.05);
                             }
-                            gestureStateRef.current.isPinching = true;
-                    } 
-                    // 8. VICTORY (Easter Egg)
-                    else if (isVictory) {
-                        status += `✌️ Victory (${Math.floor(gestureStateRef.current.victoryTimer)}s)`;
-                        gestureStateRef.current.victoryTimer += 0.03;
-                            if (gestureStateRef.current.victoryTimer > 2.0 && !isEpicSequenceRef.current) {
-                                hasTriggeredEpicRef.current = true;
-                                isEpicSequenceRef.current = true;
-                                epicTimerRef.current = 0;
-                                playWeWishYou();
-                                setBlessingCount(prev => prev + 1);
-                                rainbowStarModeRef.current = true;
-                                gestureStateRef.current.victoryTimer = 0;
                         }
-                    }
-                    // 9. THREE FINGERS (Gold Mode)
-                    else if (isThreeFinger) {
-                        status += `🤟 Gold (${Math.floor(gestureStateRef.current.threeTimer)}s)`;
-                        gestureStateRef.current.threeTimer += 0.03;
-                        if (gestureStateRef.current.threeTimer > 3.0) {
-                            isGoldModeRef.current = true;
-                            goldModeTimerRef.current = 8.0; 
-                            playJingleBells(); // Changed to Jingle Bells
+
+                        if (isFist) {
+                            status += "✊ Fist (Spin)";
+                            if (appStateRef.current !== AppState.TREE) setAppState(AppState.TREE);
+                            
+                            const palmX = landmarks[9].x; 
+                            const deviation = palmX - 0.5; 
+                            
+                            if (Math.abs(deviation) > 0.05) {
+                                rotationVelocityRef.current = -deviation * 0.2; 
+                                if (mainGroupRef.current) mainGroupRef.current.rotation.y += rotationVelocityRef.current;
+                            }
+                        } 
+                        else if (isOpen) {
+                            status += "🖐 Open (Scatter)";
+                            if (appStateRef.current !== AppState.SCATTER) setAppState(AppState.SCATTER);
+                        }
+                        else if (isPinch) {
+                             status += "👌 Pinch (Select)";
+                             if (!gestureStateRef.current.isPinching) {
+                                 if (photoMeshesRef.current.length > 0) {
+                                     playBellSound();
+                                     const randomIndex = Math.floor(Math.random() * photoMeshesRef.current.length);
+                                     zoomTargetIndexRef.current = randomIndex;
+                                     setAppState(AppState.ZOOM);
+                                     setStatusText("AI: 🎁 随机展示照片!");
+                                 } else {
+                                    setStatusText("AI: ⚠️ 空空如也 (请先插入照片)");
+                                 }
+                             }
+                             gestureStateRef.current.isPinching = true;
+                        } 
+                        else if (isVictory) {
+                            status += `✌️ Victory (${Math.floor(gestureStateRef.current.victoryTimer)}s)`;
+                            gestureStateRef.current.victoryTimer += 0.1; // Faster tick due to lower FPS
+                             if (gestureStateRef.current.victoryTimer > 2.0 && !isEpicSequenceRef.current) {
+                                 hasTriggeredEpicRef.current = true;
+                                 isEpicSequenceRef.current = true;
+                                 epicTimerRef.current = 0;
+                                 playWeWishYou();
+                                 setBlessingCount(prev => prev + 1);
+                                 rainbowStarModeRef.current = true;
+                                 gestureStateRef.current.victoryTimer = 0;
+                            }
+                        }
+                        else if (isThreeFinger) {
+                            status += `🤟 Gold (${Math.floor(gestureStateRef.current.threeTimer)}s)`;
+                            gestureStateRef.current.threeTimer += 0.1; // Faster tick due to lower FPS
+                            if (gestureStateRef.current.threeTimer > 3.0) {
+                                isGoldModeRef.current = true;
+                                goldModeTimerRef.current = 8.0; 
+                                playJingleBells(); 
+                                gestureStateRef.current.threeTimer = 0;
+                            }
+                        }
+                        else {
+                            status += "Tracing...";
+                            gestureStateRef.current.isPinching = false;
+                            gestureStateRef.current.victoryTimer = 0;
                             gestureStateRef.current.threeTimer = 0;
                         }
+
+                        setStatusText(status);
+
+                        const cursorX = (1 - landmarks[8].x) * canvas.width; 
+                        const cursorY = landmarks[8].y * canvas.height;
+                        ctx.beginPath();
+                        ctx.arc(cursorX, cursorY, 8, 0, 2*Math.PI);
+                        ctx.fillStyle = isPinch ? '#00FF00' : '#FFFFFF';
+                        ctx.fill();
+                        ctx.strokeStyle = '#000000';
+                        ctx.stroke();
+
+                    } else {
+                        setStatusText("AI: 寻找手掌...");
                     }
-                    else {
-                        status += "Tracing...";
-                        gestureStateRef.current.isPinching = false;
-                        gestureStateRef.current.victoryTimer = 0;
-                        gestureStateRef.current.threeTimer = 0;
-                    }
-
-                    setStatusText(status);
-
-                    // Draw Cursor (Index Finger Tip)
-                    const cursorX = (1 - landmarks[8].x) * canvas.width; // Mirror X
-                    const cursorY = landmarks[8].y * canvas.height;
-                    ctx.beginPath();
-                    ctx.arc(cursorX, cursorY, 8, 0, 2*Math.PI);
-                    ctx.fillStyle = isPinch ? '#00FF00' : '#FFFFFF';
-                    ctx.fill();
-                    ctx.strokeStyle = '#000000';
-                    ctx.stroke();
-
-                } else {
-                    setStatusText("AI: 寻找手掌...");
                 }
-            }
-        } catch(e) {}
+            } catch(e) {}
+        }
     };
 
-    // --- Animation Loop ---
-    const spawnFirework = (colorOverride?: number, type: 'normal' | 'snow' = 'normal') => {
+    const spawnFirework = (colorOverride?: number, type = 'normal') => {
         const colors = colorOverride ? [colorOverride] : [0xff0000, 0xffd700, 0x00ff00];
         const color = colors[Math.floor(Math.random() * colors.length)];
         const cx = (Math.random() - 0.5) * 40;
@@ -721,16 +737,13 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const mesh = group.children.find(c => c.name === type) as THREE.InstancedMesh;
         if (!mesh) return;
 
-        // PERFORMANCE: Use pooled objects
-        const dummy = tempRef.current.dummy;
-        const vec3A = tempRef.current.vec3A;
-        
+        const { dummy } = tempRef.current; // Use pooled dummy
         const isGold = isGoldModeRef.current;
         const isEpic = isEpicSequenceRef.current;
         const epicTime = epicTimerRef.current;
         const repelPos = repulsionPointRef.current;
 
-        const mat = mesh.material as THREE.MeshPhysicalMaterial;
+        const mat = mesh.material as THREE.MeshStandardMaterial;
         
         const formingText = isEpic && epicTime > 4.0 && epicTime < 16.0;
         const textTargets = logicDataRef.current.textTargets;
@@ -756,11 +769,6 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             mat.emissiveIntensity = mesh.userData.origEmissiveIntensity || 0.1;
         }
 
-        const invWorldMatrix = tempRef.current.mat4;
-        if (repelPos) {
-           invWorldMatrix.copy(group.matrixWorld).invert();
-        }
-
         for (let i = 0; i < dataArray.length; i++) {
             const item = dataArray[i];
             let target = state === AppState.TREE ? item.treePos : item.scatterPos;
@@ -776,12 +784,10 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             }
 
             if (repelPos && state === AppState.TREE && !isEpic) {
-                // PERFORMANCE: Optimized math without allocation
-                vec3A.copy(repelPos).applyMatrix4(invWorldMatrix);
-                if (item.currentPos.distanceTo(vec3A) < 18.0) {
-                    // pushDir = current - repel
-                    vec3A.copy(item.currentPos).sub(vec3A).normalize().multiplyScalar(0.2);
-                    item.currentPos.add(vec3A);
+                const localRepel = repelPos.clone().applyMatrix4(group.matrixWorld.clone().invert());
+                if (item.currentPos.distanceTo(localRepel) < 18.0) {
+                    const pushDir = item.currentPos.clone().sub(localRepel).normalize();
+                    item.currentPos.add(pushDir.multiplyScalar(0.2));
                 }
             }
 
@@ -803,7 +809,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     };
 
     const updateDustParticles = (state: AppState) => {
-        const dustSystem = mainGroup.children.find(c => (c as any).userData.isDust) as THREE.Points;
+        const dustSystem = mainGroup.children.find(c => c.userData.isDust) as THREE.Points;
         if(!dustSystem) return;
         const positions = dustSystem.geometry.attributes.position.array as Float32Array;
         const speedBoost = interactionRef.current.touches >= 3 ? 5.0 : 1.0;
@@ -814,9 +820,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                 if(item.currentPos.y > CONFIG.treeHeight/2) item.currentPos.y = -CONFIG.treeHeight/2;
                 const normH = (item.currentPos.y + CONFIG.treeHeight/2) / CONFIG.treeHeight;
                 const rMax = CONFIG.maxRadius * (1-normH) + 2;
-                // Simple distance check squared to avoid sqrt
-                const distSq = item.currentPos.x**2 + item.currentPos.z**2;
-                if(distSq > rMax * rMax) {
+                if(Math.sqrt(item.currentPos.x**2 + item.currentPos.z**2) > rMax) {
                     item.currentPos.x *= 0.98;
                     item.currentPos.z *= 0.98;
                 }
@@ -931,17 +935,17 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             star.rotation.y += 0.01;
             if (rainbowStarModeRef.current) {
                 const hue = (timeRef.current * 0.1) % 1;
-                const starMesh = star as THREE.Mesh;
-                if (starMesh.material) {
-                    (starMesh.material as THREE.MeshPhysicalMaterial).emissive.setHSL(hue, 1, 0.5);
-                    (starMesh.material as THREE.MeshPhysicalMaterial).emissiveIntensity = 2.0;
+                const mat = star.material as THREE.MeshStandardMaterial;
+                if (mat) {
+                    mat.emissive.setHSL(hue, 1, 0.5);
+                    mat.emissiveIntensity = 2.0;
                 }
             }
         }
     };
 
     const updatePhotos = (state: AppState) => {
-        photoMeshesRef.current.forEach((group: any, idx) => {
+        photoMeshesRef.current.forEach((group, idx) => {
             let targetPos, targetScale = 1.0; 
             if (state === AppState.ZOOM && idx === zoomTargetIndexRef.current) {
                 targetPos = mainGroup.worldToLocal(new THREE.Vector3(0, 0, 80));
@@ -966,13 +970,11 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         requestRef.current = requestAnimationFrame(animate);
         timeRef.current += 0.016;
         
-        // MediaPipe Check
         predictWebcam();
         
         const state = appStateRef.current;
         const group = mainGroup;
 
-        // Holding Star Logic (Only touch)
         if (isHoldingStarRef.current && !isEpicSequenceRef.current) {
             if (inputModeRef.current === 'touch' && starHoldStartTimeRef.current > 0) {
                  const holdTime = Date.now() - starHoldStartTimeRef.current;
@@ -988,8 +990,6 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                     setHoldProgress(0);
                  }
             }
-        } else if (!isEpicSequenceRef.current) {
-            // Reset if not handled by gesture logic
         }
 
         if (isEpicSequenceRef.current) {
@@ -1214,15 +1214,14 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     mainGroupRef.current.add(group);
   };
 
-  const handleTouch = (e: React.TouchEvent | React.MouseEvent, type: 'start' | 'move' | 'end') => {
-      // Disable touch interaction if in Camera Mode, unless it's UI click
+  const handleTouch = (e: any, type: string) => {
       if (inputModeRef.current === 'camera') return;
 
       initAudio();
       
       const isTouch = 'touches' in e;
-      const touches = isTouch ? (e as React.TouchEvent).touches : [];
-      const touchCount = isTouch ? touches.length : ((e as React.MouseEvent).buttons === 1 ? 1 : 0);
+      const touches = isTouch ? e.touches : [];
+      const touchCount = isTouch ? touches.length : (e.buttons === 1 ? 1 : 0);
       
       interactionRef.current.touches = touchCount;
 
@@ -1232,7 +1231,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
           if (isTouch) {
               for(let i=0; i<touches.length; i++) positions.push({x: touches[i].clientX, y: touches[i].clientY});
           } else {
-              positions.push({x: (e as React.MouseEvent).clientX, y: (e as React.MouseEvent).clientY});
+              positions.push({x: e.clientX, y: e.clientY});
           }
           interactionRef.current.startPositions = positions;
           
@@ -1267,8 +1266,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
 
       if (type === 'move') {
           if (touchCount === 1) {
-              const cx = isTouch ? touches[0].clientX : (e as React.MouseEvent).clientX;
-              const cy = isTouch ? touches[0].clientY : (e as React.MouseEvent).clientY;
+              const cx = isTouch ? touches[0].clientX : e.clientX;
+              const cy = isTouch ? touches[0].clientY : e.clientY;
               
               if (isHoldingStarRef.current) {
                    setTouchPos({x: cx, y: cy});

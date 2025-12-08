@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -23,6 +24,10 @@
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
       }
+      .fade-enter { opacity: 0; }
+      .fade-enter-active { opacity: 1; transition: opacity 300ms; }
+      .fade-exit { opacity: 1; }
+      .fade-exit-active { opacity: 0; transition: opacity 300ms; }
     </style>
     <script type="importmap">
 {
@@ -33,6 +38,7 @@
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
     "three": "https://esm.sh/three@0.165.0",
     "three/": "https://esm.sh/three@0.165.0/",
+    "three/examples/": "https://esm.sh/three@0.165.0/examples/",
     "@mediapipe/tasks-vision": "https://esm.sh/@mediapipe/tasks-vision@0.10.14",
     "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/"
   }
@@ -274,8 +280,10 @@
                 <div className="relative w-full h-full">
                   <video ref={videoRef} id="input-video" className="absolute inset-0 w-full h-full object-cover opacity-50 mirror" playsInline muted autoPlay></video>
                   <canvas id="skeleton-canvas" className="absolute inset-0 w-full h-full object-cover mirror"></canvas>
-                  <div className="absolute top-1 left-2 text-[8px] text-cyan-400 font-bold uppercase tracking-widest bg-black/50 px-1 rounded">
-                      AI Vision
+                  <div className="absolute top-1 left-2 text-[8px] text-cyan-400 font-bold uppercase tracking-widest bg-black/50 px-1 rounded flex items-center gap-1">
+                      <span>AI Vision</span>
+                      {/* Status Dot */}
+                      <span className={`w-2 h-2 rounded-full ${inputMode === 'camera' ? 'animate-pulse bg-green-500' : 'bg-red-500'}`}></span>
                   </div>
                 </div>
             </div>
@@ -390,11 +398,11 @@
 
       // --- Components/JewelTreeScene.tsx ---
       const CONFIG = {
-        goldCount: 800, 
-        silverCount: 800,
-        gemCount: 400,
-        emeraldCount: 400,
-        dustCount: 1200,
+        goldCount: 500,     
+        silverCount: 500,   
+        gemCount: 200,      
+        emeraldCount: 200,  
+        dustCount: 600,     
         treeHeight: 75,
         maxRadius: 30
       };
@@ -412,6 +420,15 @@
         const rendererRef = useRef(null);
         const mainGroupRef = useRef(null);
         
+        // Performance Optimization Refs (Object Reuse)
+        const tempRef = useRef({
+          dummy: new THREE.Object3D(),
+          vec3A: new THREE.Vector3(),
+          vec3B: new THREE.Vector3(),
+          vec3C: new THREE.Vector3(),
+          mat4: new THREE.Matrix4()
+        });
+
         // Logic Data Refs
         const logicDataRef = useRef({
           gold: [],
@@ -454,7 +471,10 @@
 
         // MediaPipe Refs
         const handLandmarkerRef = useRef(null);
+        const lastPredictionTimeRef = useRef(0);
         const lastVideoTimeRef = useRef(-1);
+        const isProcessingRef = useRef(false);
+
         const gestureStateRef = useRef({
           isPinching: false,
           victoryTimer: 0,
@@ -495,40 +515,55 @@
                 const initVision = async () => {
                     try {
                         setStatusText("初始化: 检查环境...");
-
                         if (!window.isSecureContext && window.location.hostname !== 'localhost') {
                             throw new Error("摄像头需 HTTPS 或 Localhost 环境");
                         }
-                        
                         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                             throw new Error("浏览器不支持摄像头 API");
                         }
 
                         setStatusText("初始化: 加载 AI 模型...");
-
+                        
+                        // Robust WASM loading
                         const vision = await FilesetResolver.forVisionTasks(
                             "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
                         );
                         
                         if (isCancelled) return;
                         
-                        handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
-                            baseOptions: {
-                                modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
-                                delegate: "GPU"
-                            },
-                            runningMode: "VIDEO", 
-                            numHands: 1, 
-                            minHandDetectionConfidence: 0.3,
-                            minHandPresenceConfidence: 0.3,
-                            minTrackingConfidence: 0.3
-                        });
+                        // Try GPU, fallback to CPU
+                        try {
+                             handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+                                baseOptions: {
+                                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                                    delegate: "GPU"
+                                },
+                                runningMode: "VIDEO", 
+                                numHands: 1, 
+                                minHandDetectionConfidence: 0.3,
+                                minHandPresenceConfidence: 0.3,
+                                minTrackingConfidence: 0.3
+                            });
+                        } catch (gpuError) {
+                            console.warn("GPU init failed, switching to CPU", gpuError);
+                            setStatusText("GPU 加速失败，切换至 CPU 模式...");
+                            handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+                                baseOptions: {
+                                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                                    delegate: "CPU"
+                                },
+                                runningMode: "VIDEO", 
+                                numHands: 1,
+                                minHandDetectionConfidence: 0.3,
+                                minHandPresenceConfidence: 0.3,
+                                minTrackingConfidence: 0.3
+                            });
+                        }
 
                         setStatusText("初始化: 请求摄像头权限...");
                         
                         if (videoRef.current) {
                             const video = videoRef.current;
-                            
                             try {
                                 stream = await navigator.mediaDevices.getUserMedia({ 
                                     video: { 
@@ -539,18 +574,8 @@
                                     audio: false
                                 });
                             } catch (err) {
-                                console.warn("Standard constraints failed, trying basic...", err);
-                                try {
-                                   stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-                                } catch (err2) {
-                                   if (err2.name === 'NotAllowedError' || err2.name === 'PermissionDeniedError') {
-                                      throw new Error("请允许摄像头权限");
-                                   } else if (err2.name === 'NotFoundError') {
-                                      throw new Error("未检测到摄像头");
-                                   } else {
-                                      throw new Error(`无法开启摄像头: ${err2.message}`);
-                                   }
-                                }
+                                console.warn("Fallback to basic constraints", err);
+                                stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
                             }
 
                             if (isCancelled) {
@@ -559,15 +584,22 @@
                             }
                             
                             video.srcObject = stream;
-                            video.onloadedmetadata = () => {
-                                video.play().catch(e => console.error("Video play failed", e));
-                            };
+                            // Critical: Force play for IOS
+                            video.setAttribute('playsinline', 'true');
+                            video.muted = true;
                             
-                            video.onloadeddata = () => {
-                                setStatusText("AI Ready: 请举起一只手 👋");
-                            };
-                        } else {
-                            setStatusText("Error: 视频组件未加载");
+                            await new Promise((resolve) => {
+                                video.onloadedmetadata = () => {
+                                    video.play().then(resolve).catch(e => {
+                                        console.error("Play failed", e);
+                                        // User interaction might be needed
+                                        setStatusText("请点击屏幕以启动摄像头");
+                                        resolve();
+                                    });
+                                };
+                            });
+                            
+                            setStatusText("AI Ready: 请举起一只手 👋");
                         }
                     } catch (err) {
                         console.error("Camera/AI initialization failed:", err);
@@ -700,22 +732,52 @@
           };
 
           const createMaterialsAndMeshes = () => {
-              const goldMat = new THREE.MeshPhysicalMaterial({ color: 0xffaa00, metalness: 1.0, roughness: 0.15, clearcoat: 1.0, emissive: 0xaa5500, emissiveIntensity: 0.1 });
+              // OPTIMIZATION: Use Standard Material instead of Physical for performance
+              const goldMat = new THREE.MeshStandardMaterial({ 
+                  color: 0xffaa00, 
+                  metalness: 1.0, 
+                  roughness: 0.2, 
+                  emissive: 0xaa5500, 
+                  emissiveIntensity: 0.1 
+              });
               goldMat.userData = { origEmissive: 0xaa5500, origEmissiveIntensity: 0.1 };
 
-              const silverMat = new THREE.MeshPhysicalMaterial({ color: 0xeeeeee, metalness: 0.9, roughness: 0.2, clearcoat: 1.0, emissive: 0x222222, emissiveIntensity: 0.1 });
+              const silverMat = new THREE.MeshStandardMaterial({ 
+                  color: 0xeeeeee, 
+                  metalness: 0.9, 
+                  roughness: 0.2, 
+                  emissive: 0x222222, 
+                  emissiveIntensity: 0.1 
+              });
               silverMat.userData = { origEmissive: 0x222222, origEmissiveIntensity: 0.1 };
 
-              const gemMat = new THREE.MeshPhysicalMaterial({ color: 0xff0044, metalness: 0.1, roughness: 0.0, transmission: 0.5, thickness: 1.0, emissive: 0x440011, emissiveIntensity: 0.3 });
+              // OPTIMIZATION: Use transparent standard material instead of transmission (glass)
+              const gemMat = new THREE.MeshStandardMaterial({ 
+                  color: 0xff0044, 
+                  metalness: 0.1, 
+                  roughness: 0.1, 
+                  transparent: true,
+                  opacity: 0.8,
+                  emissive: 0x440011, 
+                  emissiveIntensity: 0.3 
+              });
               gemMat.userData = { origEmissive: 0x440011, origEmissiveIntensity: 0.3 };
 
-              const emeraldMat = new THREE.MeshPhysicalMaterial({ color: 0x00aa55, metalness: 0.2, roughness: 0.1, transmission: 0.4, thickness: 1.5, emissive: 0x002211, emissiveIntensity: 0.2 });
+              const emeraldMat = new THREE.MeshStandardMaterial({ 
+                  color: 0x00aa55, 
+                  metalness: 0.2, 
+                  roughness: 0.1, 
+                  transparent: true,
+                  opacity: 0.8,
+                  emissive: 0x002211, 
+                  emissiveIntensity: 0.2 
+              });
               emeraldMat.userData = { origEmissive: 0x002211, origEmissiveIntensity: 0.2 };
 
-              const sphereGeo = new THREE.SphereGeometry(0.7, 16, 16);
+              const sphereGeo = new THREE.SphereGeometry(0.7, 12, 12); // Reduced segments
               const boxGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
               const diamondGeo = new THREE.OctahedronGeometry(0.8, 0);
-              const coneGeo = new THREE.ConeGeometry(0.5, 1.2, 8);
+              const coneGeo = new THREE.ConeGeometry(0.5, 1.2, 6); // Reduced segments
 
               createInstancedMesh(sphereGeo, goldMat, CONFIG.goldCount, logicDataRef.current.gold, 'gold');
               createInstancedMesh(boxGeo, silverMat, CONFIG.silverCount, logicDataRef.current.silver, 'silver');
@@ -724,7 +786,7 @@
 
               const star = new THREE.Mesh(
                   new THREE.OctahedronGeometry(3.0, 0), 
-                  new THREE.MeshPhysicalMaterial({ color: 0xffffff, metalness:0.8, roughness:0, emissive:0xffffee, emissiveIntensity:1 })
+                  new THREE.MeshStandardMaterial({ color: 0xffffff, metalness:0.8, roughness:0.2, emissive:0xffffee, emissiveIntensity:1 })
               );
               star.userData = { treePos: new THREE.Vector3(0, CONFIG.treeHeight/2 + 2, 0), scatterPos: new THREE.Vector3(0, 60, 0) };
               star.position.copy(star.userData.treePos);
@@ -755,7 +817,7 @@
           const createStarField = () => {
               const geo = new THREE.BufferGeometry();
               const pos = [];
-              for(let i=0; i<1000; i++) pos.push((Math.random()-0.5)*1000, (Math.random()-0.5)*1000, (Math.random()-0.5)*1000);
+              for(let i=0; i<800; i++) pos.push((Math.random()-0.5)*1000, (Math.random()-0.5)*1000, (Math.random()-0.5)*1000);
               geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
               const stars = new THREE.Points(geo, new THREE.PointsMaterial({color: 0x888888, size: 1.2, transparent: true, opacity: 0.5}));
               scene.add(stars);
@@ -865,144 +927,160 @@
           const predictWebcam = () => {
               if (!handLandmarkerRef.current || !videoRef.current || inputModeRef.current !== 'camera') return;
               const video = videoRef.current;
-              if (video.readyState < 2 || video.videoWidth === 0) return;
+              
+              // Only process if video is actually ready
+              if (video.readyState < 2) return;
+              
+              // Throttle prediction (50ms = 20fps)
+              const now = performance.now();
+              if (now - lastPredictionTimeRef.current < 50) return;
+              lastPredictionTimeRef.current = now;
 
-              if (video.currentTime !== lastVideoTimeRef.current) {
-                  lastVideoTimeRef.current = video.currentTime;
+              try {
+                  const startTimeMs = performance.now();
+                  const result = handLandmarkerRef.current.detectForVideo(video, startTimeMs);
                   
-                  try {
-                      const result = handLandmarkerRef.current.detectForVideo(video, Date.now());
-                      const canvas = document.getElementById('skeleton-canvas');
-                      if (canvas && canvas.getContext('2d')) {
-                          const ctx = canvas.getContext('2d');
-                          ctx.clearRect(0, 0, canvas.width, canvas.height);
-                          if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
-                          if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
-                          
-                          if (result.landmarks && result.landmarks.length > 0) {
-                              const landmarks = result.landmarks[0]; 
+                  const canvas = document.getElementById('skeleton-canvas');
+                  if (canvas && canvas.getContext('2d')) {
+                      const ctx = canvas.getContext('2d');
+                      ctx.clearRect(0, 0, canvas.width, canvas.height);
+                      
+                      // Sync canvas size with video
+                      if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+                      if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
+                      
+                      // Visual debug: Searching...
+                      if (!result.landmarks || result.landmarks.length === 0) {
+                         ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+                         ctx.font = '20px monospace';
+                         ctx.fillText("Searching...", 20, 40);
+                      }
 
-                              ctx.lineWidth = 3; ctx.strokeStyle = '#FFD700'; ctx.fillStyle = '#FF4400';
-                              const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
-                              ctx.beginPath();
-                              connections.forEach(([s, e]) => {
-                                  ctx.moveTo(landmarks[s].x * canvas.width, landmarks[s].y * canvas.height);
-                                  ctx.lineTo(landmarks[e].x * canvas.width, landmarks[e].y * canvas.height);
-                              });
-                              ctx.stroke();
+                      if (result.landmarks && result.landmarks.length > 0) {
+                          const landmarks = result.landmarks[0]; 
 
-                              const dist = (i1, i2) => {
-                                  const dx = landmarks[i1].x - landmarks[i2].x;
-                                  const dy = landmarks[i1].y - landmarks[i2].y;
-                                  const dz = landmarks[i1].z - landmarks[i2].z;
-                                  return Math.sqrt(dx*dx + dy*dy + dz*dz);
-                              };
-                              const isExt = (tip, pip) => dist(0, tip) > dist(0, pip) * 1.1;
+                          ctx.lineWidth = 3; ctx.strokeStyle = '#FFD700'; ctx.fillStyle = '#FF4400';
+                          const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+                          ctx.beginPath();
+                          connections.forEach(([s, e]) => {
+                              ctx.moveTo(landmarks[s].x * canvas.width, landmarks[s].y * canvas.height);
+                              ctx.lineTo(landmarks[e].x * canvas.width, landmarks[e].y * canvas.height);
+                          });
+                          ctx.stroke();
 
-                              const thumbOpen = isExt(4, 2);
-                              const indexOpen = isExt(8, 6);
-                              const midOpen = isExt(12, 10);
-                              const ringOpen = isExt(16, 14);
-                              const pinkyOpen = isExt(20, 18);
-                              const extendedCount = (thumbOpen?1:0)+(indexOpen?1:0)+(midOpen?1:0)+(ringOpen?1:0)+(pinkyOpen?1:0);
+                          const dist = (i1, i2) => {
+                              const dx = landmarks[i1].x - landmarks[i2].x;
+                              const dy = landmarks[i1].y - landmarks[i2].y;
+                              const dz = landmarks[i1].z - landmarks[i2].z;
+                              return Math.sqrt(dx*dx + dy*dy + dz*dz);
+                          };
+                          const isExt = (tip, pip) => dist(0, tip) > dist(0, pip) * 1.1;
 
-                              const isFist = !indexOpen && !midOpen && !ringOpen && !pinkyOpen;
-                              const isOpen = extendedCount === 5;
-                              const isPointing = indexOpen && !midOpen && !ringOpen && !pinkyOpen;
-                              const isVictory = indexOpen && midOpen && !ringOpen && !pinkyOpen;
-                              const isThreeFinger = indexOpen && midOpen && ringOpen && !pinkyOpen;
-                              const pinchDist = dist(4, 8);
-                              const isPinch = pinchDist < 0.05;
+                          const thumbOpen = isExt(4, 2);
+                          const indexOpen = isExt(8, 6);
+                          const midOpen = isExt(12, 10);
+                          const ringOpen = isExt(16, 14);
+                          const pinkyOpen = isExt(20, 18);
+                          const extendedCount = (thumbOpen?1:0)+(indexOpen?1:0)+(midOpen?1:0)+(ringOpen?1:0)+(pinkyOpen?1:0);
 
-                              let status = "AI: ";
+                          const isFist = !indexOpen && !midOpen && !ringOpen && !pinkyOpen;
+                          const isOpen = extendedCount === 5;
+                          const isPointing = indexOpen && !midOpen && !ringOpen && !pinkyOpen;
+                          const isVictory = indexOpen && midOpen && !ringOpen && !pinkyOpen;
+                          const isThreeFinger = indexOpen && midOpen && ringOpen && !pinkyOpen;
+                          const pinchDist = dist(4, 8);
+                          const isPinch = pinchDist < 0.05;
 
-                              if (isPointing) {
-                                  status += "☝️ Point (Zoom)";
-                                  const handSize = dist(0, 12); 
-                                  if (cameraRef.current) {
-                                      let targetZ = 250 - (handSize * 600);
-                                      targetZ = Math.max(30, Math.min(220, targetZ));
-                                      cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, targetZ, 0.05);
-                                  }
+                          let status = "AI: ";
+
+                          if (isPointing) {
+                              status += "☝️ Point (Zoom)";
+                              const handSize = dist(0, 12); 
+                              if (cameraRef.current) {
+                                  let targetZ = 250 - (handSize * 600);
+                                  targetZ = Math.max(30, Math.min(220, targetZ));
+                                  cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, targetZ, 0.05);
                               }
+                          }
 
-                              if (isFist) {
-                                  status += "✊ Fist (Spin)";
-                                  if (appStateRef.current !== AppState.TREE) setAppState(AppState.TREE);
-                                  
-                                  const palmX = landmarks[9].x; 
-                                  const deviation = palmX - 0.5; 
-                                  
-                                  if (Math.abs(deviation) > 0.05) {
-                                      rotationVelocityRef.current = -deviation * 0.2; 
-                                      if (mainGroupRef.current) mainGroupRef.current.rotation.y += rotationVelocityRef.current;
-                                  }
-                              } 
-                              else if (isOpen) {
-                                  status += "🖐 Open (Scatter)";
-                                  if (appStateRef.current !== AppState.SCATTER) setAppState(AppState.SCATTER);
+                          if (isFist) {
+                              status += "✊ Fist (Spin)";
+                              if (appStateRef.current !== AppState.TREE) setAppState(AppState.TREE);
+                              
+                              const palmX = landmarks[9].x; 
+                              const deviation = palmX - 0.5; 
+                              
+                              if (Math.abs(deviation) > 0.05) {
+                                  rotationVelocityRef.current = -deviation * 0.2; 
+                                  if (mainGroupRef.current) mainGroupRef.current.rotation.y += rotationVelocityRef.current;
                               }
-                              else if (isPinch) {
-                                   status += "👌 Pinch (Select)";
-                                   if (!gestureStateRef.current.isPinching) {
+                          } 
+                          else if (isOpen) {
+                              status += "🖐 Open (Scatter)";
+                              if (appStateRef.current !== AppState.SCATTER) setAppState(AppState.SCATTER);
+                          }
+                          else if (isPinch) {
+                               status += "👌 Pinch (Select)";
+                               if (!gestureStateRef.current.isPinching) {
+                                   if (photoMeshesRef.current.length > 0) {
                                        playBellSound();
-                                       if (containerRef.current) {
-                                           const rect = containerRef.current.getBoundingClientRect();
-                                           const rawX = (landmarks[4].x + landmarks[8].x) / 2;
-                                           const rawY = (landmarks[4].y + landmarks[8].y) / 2;
-                                           const screenX = (1 - rawX) * rect.width + rect.left;
-                                           const screenY = rawY * rect.height + rect.top;
-                                           handlePhotoClick(screenX, screenY);
-                                       }
+                                       const randomIndex = Math.floor(Math.random() * photoMeshesRef.current.length);
+                                       zoomTargetIndexRef.current = randomIndex;
+                                       setAppState(AppState.ZOOM);
+                                       setStatusText("AI: 🎁 随机展示照片!");
+                                   } else {
+                                      setStatusText("AI: ⚠️ 空空如也 (请先插入照片)");
                                    }
-                                   gestureStateRef.current.isPinching = true;
-                              } 
-                              else if (isVictory) {
-                                  status += `✌️ Victory (${Math.floor(gestureStateRef.current.victoryTimer)}s)`;
-                                  gestureStateRef.current.victoryTimer += 0.03;
-                                   if (gestureStateRef.current.victoryTimer > 2.0 && !isEpicSequenceRef.current) {
-                                       hasTriggeredEpicRef.current = true;
-                                       isEpicSequenceRef.current = true;
-                                       epicTimerRef.current = 0;
-                                       playWeWishYou();
-                                       setBlessingCount(prev => prev + 1);
-                                       rainbowStarModeRef.current = true;
-                                       gestureStateRef.current.victoryTimer = 0;
-                                  }
+                               }
+                               gestureStateRef.current.isPinching = true;
+                          } 
+                          else if (isVictory) {
+                              status += `✌️ Victory (${Math.floor(gestureStateRef.current.victoryTimer)}s)`;
+                              gestureStateRef.current.victoryTimer += 0.06;
+                               if (gestureStateRef.current.victoryTimer > 2.0 && !isEpicSequenceRef.current) {
+                                   hasTriggeredEpicRef.current = true;
+                                   isEpicSequenceRef.current = true;
+                                   epicTimerRef.current = 0;
+                                   playWeWishYou();
+                                   setBlessingCount(prev => prev + 1);
+                                   rainbowStarModeRef.current = true;
+                                   gestureStateRef.current.victoryTimer = 0;
                               }
-                              else if (isThreeFinger) {
-                                  status += `🤟 Gold (${Math.floor(gestureStateRef.current.threeTimer)}s)`;
-                                  gestureStateRef.current.threeTimer += 0.03;
-                                  if (gestureStateRef.current.threeTimer > 3.0) {
-                                      isGoldModeRef.current = true;
-                                      goldModeTimerRef.current = 8.0; 
-                                      playJingleBells(); 
-                                      gestureStateRef.current.threeTimer = 0;
-                                  }
-                              }
-                              else {
-                                  status += "Tracing...";
-                                  gestureStateRef.current.isPinching = false;
-                                  gestureStateRef.current.victoryTimer = 0;
+                          }
+                          else if (isThreeFinger) {
+                              status += `🤟 Gold (${Math.floor(gestureStateRef.current.threeTimer)}s)`;
+                              gestureStateRef.current.threeTimer += 0.06;
+                              if (gestureStateRef.current.threeTimer > 3.0) {
+                                  isGoldModeRef.current = true;
+                                  goldModeTimerRef.current = 8.0; 
+                                  playJingleBells(); 
                                   gestureStateRef.current.threeTimer = 0;
                               }
-
-                              setStatusText(status);
-
-                              const cursorX = (1 - landmarks[8].x) * canvas.width; 
-                              const cursorY = landmarks[8].y * canvas.height;
-                              ctx.beginPath();
-                              ctx.arc(cursorX, cursorY, 8, 0, 2*Math.PI);
-                              ctx.fillStyle = isPinch ? '#00FF00' : '#FFFFFF';
-                              ctx.fill();
-                              ctx.strokeStyle = '#000000';
-                              ctx.stroke();
-
-                          } else {
-                              setStatusText("AI: 寻找手掌...");
                           }
+                          else {
+                              status += "Tracing...";
+                              gestureStateRef.current.isPinching = false;
+                              gestureStateRef.current.victoryTimer = 0;
+                              gestureStateRef.current.threeTimer = 0;
+                          }
+
+                          setStatusText(status);
+
+                          const cursorX = (1 - landmarks[8].x) * canvas.width; 
+                          const cursorY = landmarks[8].y * canvas.height;
+                          ctx.beginPath();
+                          ctx.arc(cursorX, cursorY, 8, 0, 2*Math.PI);
+                          ctx.fillStyle = isPinch ? '#00FF00' : '#FFFFFF';
+                          ctx.fill();
+                          ctx.strokeStyle = '#000000';
+                          ctx.stroke();
+
+                      } else {
+                          setStatusText("AI: 寻找手掌...");
                       }
-                  } catch(e) {}
+                  }
+              } catch(e) {
+                  console.warn(e);
               }
           };
 
@@ -1043,7 +1121,7 @@
               const mesh = group.children.find(c => c.name === type);
               if (!mesh) return;
 
-              const dummy = new THREE.Object3D();
+              const { dummy } = tempRef.current;
               const isGold = isGoldModeRef.current;
               const isEpic = isEpicSequenceRef.current;
               const epicTime = epicTimerRef.current;
@@ -1241,9 +1319,10 @@
                   star.rotation.y += 0.01;
                   if (rainbowStarModeRef.current) {
                       const hue = (timeRef.current * 0.1) % 1;
-                      if (star.material) {
-                          star.material.emissive.setHSL(hue, 1, 0.5);
-                          star.material.emissiveIntensity = 2.0;
+                      const mat = star.material;
+                      if (mat) {
+                          mat.emissive.setHSL(hue, 1, 0.5);
+                          mat.emissiveIntensity = 2.0;
                       }
                   }
               }
@@ -1779,7 +1858,5 @@
         </React.StrictMode>
       );
     </script>
-  
-  < script type= " module" src= " /index.tsx"></script>
- </body>
+  </body>
 </html>
