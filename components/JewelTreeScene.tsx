@@ -1,0 +1,1377 @@
+
+import React, { useEffect, useRef } from 'react';
+import * as THREE from 'three';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment';
+import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
+import { AppState, AppSettings, InputMode } from '../App';
+
+// Configuration - Optimized counts for better performance
+const CONFIG = {
+  goldCount: 600,     // Reduced from 800
+  silverCount: 600,   // Reduced from 800
+  gemCount: 300,      // Reduced from 400
+  emeraldCount: 300,  // Reduced from 400
+  dustCount: 800,     // Reduced from 1200
+  treeHeight: 75,
+  maxRadius: 30
+};
+
+// Types
+interface InteractionState {
+  touches: number;
+  lastDistance: number;
+  lastAngle: number;
+  startPositions: { x: number, y: number }[];
+  startTime: number;
+  lastTapTime: number;
+}
+
+interface JewelTreeSceneProps {
+  appState: AppState;
+  setAppState: React.Dispatch<React.SetStateAction<AppState>>;
+  setStatusText: (text: string) => void;
+  uploadedImages: HTMLImageElement[];
+  setAuroraActive: (active: boolean) => void;
+  settings: AppSettings;
+  setBlessingCount: React.Dispatch<React.SetStateAction<number>>;
+  setHoldProgress: (p: number) => void;
+  setTouchPos: (pos: {x: number, y: number}) => void;
+  inputMode: InputMode;
+  videoRef: React.RefObject<HTMLVideoElement>;
+}
+
+const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({ 
+  appState, setAppState, setStatusText, uploadedImages, setAuroraActive, settings,
+  setBlessingCount, setHoldProgress, setTouchPos, inputMode, videoRef
+}) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const requestRef = useRef<number | null>(null);
+  
+  // Three.js Refs
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const mainGroupRef = useRef<THREE.Group | null>(null);
+  
+  // Performance Optimization Refs (Object Reuse)
+  const tempRef = useRef({
+    dummy: new THREE.Object3D(),
+    vec3A: new THREE.Vector3(),
+    vec3B: new THREE.Vector3(),
+    vec3C: new THREE.Vector3(),
+    mat4: new THREE.Matrix4()
+  });
+
+  // Logic Data Refs
+  const logicDataRef = useRef({
+    gold: [] as any[],
+    silver: [] as any[],
+    gem: [] as any[],
+    emerald: [] as any[],
+    dust: [] as any[],
+    star: null as THREE.Mesh | null,
+    ribbon: null as THREE.Mesh | null,
+    fireworks: [] as any[],
+    textTargets: null as { gold: THREE.Vector3[], silver: THREE.Vector3[] } | null
+  });
+  
+  const photoMeshesRef = useRef<THREE.Object3D[]>([]);
+  const zoomTargetIndexRef = useRef<number>(-1);
+  const timeRef = useRef<number>(0);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  
+  // Interaction/State Refs
+  const isGoldModeRef = useRef(false);
+  const goldModeTimerRef = useRef(0);
+  const shakeIntensityRef = useRef(0);
+  const rotationVelocityRef = useRef(0);
+  
+  // Epic Sequence Refs
+  const isEpicSequenceRef = useRef(false);
+  const epicTimerRef = useRef(0);
+  const isHoldingStarRef = useRef(false);
+  const starHoldStartTimeRef = useRef(0);
+  const hasTriggeredEpicRef = useRef(false);
+  const rainbowStarModeRef = useRef(false);
+
+  // Interaction Vectors
+  const interactionRef = useRef<InteractionState>({
+    touches: 0, lastDistance: 0, lastAngle: 0, startPositions: [], startTime: 0, lastTapTime: 0
+  });
+  const repulsionPointRef = useRef<THREE.Vector3 | null>(null);
+  const raycasterRef = useRef(new THREE.Raycaster());
+  const planeRef = useRef(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0));
+
+  // MediaPipe Refs
+  const handLandmarkerRef = useRef<HandLandmarker | null>(null);
+  const lastPredictionTimeRef = useRef(0);
+  const gestureStateRef = useRef({
+    isPinching: false,
+    victoryTimer: 0,
+    threeTimer: 0,
+  });
+
+  // State Mirror
+  const appStateRef = useRef(appState);
+  const settingsRef = useRef(settings);
+  const inputModeRef = useRef(inputMode);
+
+  useEffect(() => {
+    appStateRef.current = appState;
+    settingsRef.current = settings;
+    inputModeRef.current = inputMode;
+    if (inputMode === 'touch') {
+        if (appState === AppState.TREE) setStatusText("状态：圣诞树 (长按星星许愿)");
+        if (appState === AppState.SCATTER) setStatusText("状态：星云散开 (双指点击复原)");
+        if (appState === AppState.ZOOM) setStatusText("状态：照片详情");
+    }
+  }, [appState, settings, inputMode, setStatusText]);
+
+  useEffect(() => {
+    if (!mainGroupRef.current) return;
+    if (uploadedImages.length > photoMeshesRef.current.length) {
+        const newImages = uploadedImages.slice(photoMeshesRef.current.length);
+        newImages.forEach(img => addPhotoMesh(img));
+        setStatusText(`已添加照片 (${uploadedImages.length})`);
+    }
+  }, [uploadedImages, setStatusText]);
+
+  // --- MediaPipe Initialization ---
+  useEffect(() => {
+      let stream: MediaStream | null = null;
+      let isCancelled = false;
+
+      if (inputMode === 'camera') {
+          const initVision = async () => {
+              try {
+                  setStatusText("初始化: 检查环境...");
+
+                  // Secure Context Check
+                  if (!window.isSecureContext && window.location.hostname !== 'localhost') {
+                      throw new Error("摄像头需 HTTPS 或 Localhost 环境");
+                  }
+                  
+                  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                      throw new Error("浏览器不支持摄像头 API");
+                  }
+
+                  setStatusText("初始化: 加载 AI 模型...");
+
+                  // Initialize Vision Tasks
+                  const vision = await FilesetResolver.forVisionTasks(
+                      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+                  );
+                  
+                  if (isCancelled) return;
+                  
+                  handLandmarkerRef.current = await HandLandmarker.createFromOptions(vision, {
+                      baseOptions: {
+                          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+                          delegate: "GPU"
+                      },
+                      runningMode: "VIDEO", 
+                      numHands: 1, // Single Hand Master Mode
+                      minHandDetectionConfidence: 0.3,
+                      minHandPresenceConfidence: 0.3,
+                      minTrackingConfidence: 0.3
+                  });
+
+                  setStatusText("初始化: 请求摄像头权限...");
+                  
+                  if (videoRef.current) {
+                      const video = videoRef.current;
+                      
+                      // Try accessing camera with fallbacks
+                      try {
+                          stream = await navigator.mediaDevices.getUserMedia({ 
+                              video: { 
+                                  facingMode: "user",
+                                  width: { ideal: 640 },
+                                  height: { ideal: 480 }
+                              },
+                              audio: false
+                          });
+                      } catch (err) {
+                          console.warn("Standard constraints failed, trying basic...", err);
+                          try {
+                             stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                          } catch (err2: any) {
+                             if (err2.name === 'NotAllowedError' || err2.name === 'PermissionDeniedError') {
+                                throw new Error("请允许摄像头权限");
+                             } else if (err2.name === 'NotFoundError') {
+                                throw new Error("未检测到摄像头");
+                             } else {
+                                throw new Error(`无法开启摄像头: ${err2.message}`);
+                             }
+                          }
+                      }
+
+                      if (isCancelled) {
+                          if (stream) stream.getTracks().forEach(t => t.stop());
+                          return;
+                      }
+                      
+                      video.srcObject = stream;
+                      video.onloadedmetadata = () => {
+                          video.play().catch(e => console.error("Video play failed", e));
+                      };
+                      
+                      video.onloadeddata = () => {
+                          setStatusText("AI Ready: 请举起一只手 👋");
+                      };
+                  } else {
+                      setStatusText("Error: 视频组件未加载");
+                  }
+              } catch (err: any) {
+                  console.error("Camera/AI initialization failed:", err);
+                  setStatusText(`Error: ${err.message || "初始化失败"}`);
+              }
+          };
+          initVision();
+      } else {
+          // Cleanup
+          handLandmarkerRef.current = null;
+          if (videoRef.current && videoRef.current.srcObject) {
+              const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
+              tracks.forEach(track => track.stop());
+              videoRef.current.srcObject = null;
+          }
+      }
+
+      return () => {
+          isCancelled = true;
+          if (stream) {
+              stream.getTracks().forEach(t => t.stop());
+          }
+      };
+  }, [inputMode]);
+
+  // --- Main 3D Initialization ---
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    logicDataRef.current.gold = [];
+    logicDataRef.current.silver = [];
+    logicDataRef.current.gem = [];
+    logicDataRef.current.emerald = [];
+    logicDataRef.current.dust = [];
+    logicDataRef.current.fireworks = [];
+    logicDataRef.current.textTargets = null;
+    photoMeshesRef.current = [];
+
+    const width = containerRef.current.clientWidth;
+    const height = containerRef.current.clientHeight;
+    if (width === 0 || height === 0) return;
+
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
+    camera.position.set(0, 0, 110);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    containerRef.current.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.2);
+    scene.add(ambientLight);
+    
+    const spotLight = new THREE.SpotLight(0xffddaa, 100);
+    spotLight.position.set(30, 60, 50);
+    spotLight.angle = Math.PI / 4;
+    spotLight.penumbra = 0.5;
+    spotLight.castShadow = true;
+    spotLight.shadow.mapSize.width = 1024;
+    spotLight.shadow.mapSize.height = 1024;
+    scene.add(spotLight);
+    
+    const blueLight = new THREE.PointLight(0xaaddff, 40, 100);
+    blueLight.position.set(-30, -20, 30);
+    scene.add(blueLight);
+
+    const frontLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    frontLight.position.set(0, 10, 100);
+    frontLight.castShadow = false;
+    scene.add(frontLight);
+
+    const renderScene = new RenderPass(scene, camera);
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 1.5, 0.4, 0.85);
+    bloomPass.threshold = 0.3;
+    bloomPass.strength = 0.6;
+    bloomPass.radius = 0.5;
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(renderScene);
+    composer.addPass(bloomPass);
+
+    const mainGroup = new THREE.Group();
+    scene.add(mainGroup);
+    mainGroupRef.current = mainGroup;
+
+    const randomSpherePoint = (r: number) => {
+        const u = Math.random(), v = Math.random();
+        const theta = 2 * Math.PI * u, phi = Math.acos(2 * v - 1);
+        return new THREE.Vector3(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
+    };
+
+    const createInstancedMesh = (geo: THREE.BufferGeometry, mat: THREE.Material, count: number, dataArray: any[], name: string) => {
+        const mesh = new THREE.InstancedMesh(geo, mat, count);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        mesh.name = name; 
+        mainGroup.add(mesh);
+        
+        for (let i = 0; i < count; i++) {
+            const h = Math.random() * CONFIG.treeHeight - CONFIG.treeHeight/2;
+            const normH = (h + CONFIG.treeHeight/2) / CONFIG.treeHeight;
+            const rMax = CONFIG.maxRadius * (1 - normH);
+            const r = Math.sqrt(Math.random()) * rMax; 
+            const theta = Math.random() * Math.PI * 2;
+            const treePos = new THREE.Vector3(r * Math.cos(theta), h, r * Math.sin(theta));
+            const scatterPos = randomSpherePoint(40 + Math.random()*40);
+
+            dataArray.push({
+                treePos: treePos,
+                scatterPos: scatterPos,
+                currentPos: treePos.clone(),
+                scale: 0.6 + Math.random() * 0.8,
+                rotSpeed: new THREE.Euler(Math.random()*0.03, Math.random()*0.03, Math.random()*0.03),
+                rotation: new THREE.Euler(Math.random()*Math.PI, Math.random()*Math.PI, 0)
+            });
+        }
+    };
+
+    const createMaterialsAndMeshes = () => {
+        const goldMat = new THREE.MeshPhysicalMaterial({ color: 0xffaa00, metalness: 1.0, roughness: 0.15, clearcoat: 1.0, emissive: 0xaa5500, emissiveIntensity: 0.1 });
+        goldMat.userData = { origEmissive: 0xaa5500, origEmissiveIntensity: 0.1 };
+
+        const silverMat = new THREE.MeshPhysicalMaterial({ color: 0xeeeeee, metalness: 0.9, roughness: 0.2, clearcoat: 1.0, emissive: 0x222222, emissiveIntensity: 0.1 });
+        silverMat.userData = { origEmissive: 0x222222, origEmissiveIntensity: 0.1 };
+
+        const gemMat = new THREE.MeshPhysicalMaterial({ color: 0xff0044, metalness: 0.1, roughness: 0.0, transmission: 0.5, thickness: 1.0, emissive: 0x440011, emissiveIntensity: 0.3 });
+        gemMat.userData = { origEmissive: 0x440011, origEmissiveIntensity: 0.3 };
+
+        const emeraldMat = new THREE.MeshPhysicalMaterial({ color: 0x00aa55, metalness: 0.2, roughness: 0.1, transmission: 0.4, thickness: 1.5, emissive: 0x002211, emissiveIntensity: 0.2 });
+        emeraldMat.userData = { origEmissive: 0x002211, origEmissiveIntensity: 0.2 };
+
+        const sphereGeo = new THREE.SphereGeometry(0.7, 16, 16);
+        const boxGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+        const diamondGeo = new THREE.OctahedronGeometry(0.8, 0);
+        const coneGeo = new THREE.ConeGeometry(0.5, 1.2, 8);
+
+        createInstancedMesh(sphereGeo, goldMat, CONFIG.goldCount, logicDataRef.current.gold, 'gold');
+        createInstancedMesh(boxGeo, silverMat, CONFIG.silverCount, logicDataRef.current.silver, 'silver');
+        createInstancedMesh(diamondGeo, gemMat, CONFIG.gemCount, logicDataRef.current.gem, 'gem');
+        createInstancedMesh(coneGeo, emeraldMat, CONFIG.emeraldCount, logicDataRef.current.emerald, 'emerald');
+
+        const star = new THREE.Mesh(
+            new THREE.OctahedronGeometry(3.0, 0), 
+            new THREE.MeshPhysicalMaterial({ color: 0xffffff, metalness:0.8, roughness:0, emissive:0xffffee, emissiveIntensity:1 })
+        );
+        star.userData = { treePos: new THREE.Vector3(0, CONFIG.treeHeight/2 + 2, 0), scatterPos: new THREE.Vector3(0, 60, 0) };
+        star.position.copy(star.userData.treePos);
+        mainGroup.add(star);
+        logicDataRef.current.star = star;
+    };
+
+    const createDust = () => {
+        const geo = new THREE.BufferGeometry();
+        const pos = [];
+        for(let i=0; i<CONFIG.dustCount; i++) {
+            const h = Math.random() * CONFIG.treeHeight - CONFIG.treeHeight/2;
+            const r = Math.random() * CONFIG.maxRadius * (1 - (h + CONFIG.treeHeight/2)/CONFIG.treeHeight) + 2; 
+            const theta = Math.random() * Math.PI * 2;
+            pos.push(r*Math.cos(theta), h, r*Math.sin(theta));
+            logicDataRef.current.dust.push({
+                treePos: new THREE.Vector3(r*Math.cos(theta), h, r*Math.sin(theta)),
+                scatterPos: randomSpherePoint(60),
+                currentPos: new THREE.Vector3(r*Math.cos(theta), h, r*Math.sin(theta))
+            });
+        }
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        const dustSystem = new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffee, size: 0.6, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }));
+        dustSystem.userData = { isDust: true };
+        mainGroup.add(dustSystem);
+    };
+
+    const createStarField = () => {
+        const geo = new THREE.BufferGeometry();
+        const pos = [];
+        for(let i=0; i<1000; i++) pos.push((Math.random()-0.5)*1000, (Math.random()-0.5)*1000, (Math.random()-0.5)*1000);
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        const stars = new THREE.Points(geo, new THREE.PointsMaterial({color: 0x888888, size: 1.2, transparent: true, opacity: 0.5}));
+        scene.add(stars);
+    };
+
+    const createRibbonWithMorph = () => {
+        const spiralPoints: THREE.Vector3[] = [];
+        const turns = 5;
+        const height = CONFIG.treeHeight + 10;
+        const steps = 300; 
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+            const angle = t * Math.PI * 2 * turns;
+            const y = (t - 0.5) * height; 
+            const normH = (y + CONFIG.treeHeight/2) / CONFIG.treeHeight;
+            const r = (CONFIG.maxRadius + 5) * (1 - Math.max(0, normH*0.8));
+            spiralPoints.push(new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r));
+        }
+
+        const framePoints: THREE.Vector3[] = [];
+        const w = 90; 
+        const topY = 40;
+        const botY = -30;
+        const corners = [
+            new THREE.Vector3(w, topY, 0),
+            new THREE.Vector3(-w, topY, 0),
+            new THREE.Vector3(-w, botY, 0),
+            new THREE.Vector3(w, botY, 0),
+            new THREE.Vector3(w, topY, 0)
+        ];
+        const frameCurve = new THREE.CatmullRomCurve3(corners, true, 'catmullrom', 0.1); 
+        for (let i = 0; i <= steps; i++) {
+            framePoints.push(frameCurve.getPoint(i / steps));
+        }
+
+        const spiralCurve = new THREE.CatmullRomCurve3(spiralPoints);
+        const spiralGeo = new THREE.TubeGeometry(spiralCurve, steps, 0.5, 4, false);
+        const frameCurveFinal = new THREE.CatmullRomCurve3(framePoints);
+        const frameGeo = new THREE.TubeGeometry(frameCurveFinal, steps, 0.5, 4, false);
+
+        spiralGeo.morphAttributes.position = [];
+        spiralGeo.morphAttributes.position[0] = frameGeo.attributes.position;
+        
+        const canvas = document.createElement('canvas');
+        canvas.width = 2048; canvas.height = 128;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.fillStyle = 'rgba(139, 0, 0, 0.6)'; ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#8B0000'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#FFD700'; ctx.fillRect(0, 0, canvas.width, 10); ctx.fillRect(0, canvas.height-10, canvas.width, 10);
+            ctx.font = 'bold 70px "Times New Roman", serif'; ctx.fillStyle = '#FFD700'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            const text = "圣诞快乐！  🎄  Merry Christmas!  ❄️  ";
+            const repeats = Math.ceil(canvas.width / ctx.measureText(text).width) + 1;
+            for(let i=0; i<repeats; i++) ctx.fillText(text, (i * ctx.measureText(text).width) + 300, canvas.height/2);
+        }
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.wrapS = THREE.RepeatWrapping; texture.wrapT = THREE.ClampToEdgeWrapping; texture.repeat.set(5, 1);
+
+        const material = new THREE.MeshStandardMaterial({
+            map: texture, side: THREE.DoubleSide, roughness: 0.4, metalness: 0.3, 
+            emissive: 0x550000, emissiveIntensity: 0.1, transparent: true, opacity: 0.6
+        });
+
+        const ribbon = new THREE.Mesh(spiralGeo, material);
+        ribbon.morphTargetInfluences = [0]; 
+        mainGroup.add(ribbon);
+        logicDataRef.current.ribbon = ribbon;
+    };
+
+    const createTextTargets = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 400; canvas.height = 200; 
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const scanPixels = (text: string, font: string, offsetY: number) => {
+            ctx.clearRect(0, 0, 400, 200);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = font;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(text, 200, 100);
+            
+            const imageData = ctx.getImageData(0, 0, 400, 200).data;
+            const points: THREE.Vector3[] = [];
+            for (let y = 0; y < 200; y += 3) {
+                for (let x = 0; x < 400; x += 3) {
+                    if (imageData[(y * 400 + x) * 4 + 3] > 128) {
+                        points.push(new THREE.Vector3((x - 200) * 0.4, (100 - y) * 0.4 + offsetY, 25));
+                    }
+                }
+            }
+            return points;
+        };
+        const goldTargets = scanPixels("Merry Christmas!", "bold 48px Georgia", 20); 
+        const silverTargets = scanPixels("圣诞快乐！", "bold 60px 'Microsoft YaHei'", -20);
+        logicDataRef.current.textTargets = { gold: goldTargets, silver: silverTargets };
+    };
+
+    createMaterialsAndMeshes();
+    createDust();
+    createStarField();
+    createRibbonWithMorph();
+    createTextTargets();
+
+    // --- Gesture Prediction Engine (Single Hand Master) ---
+    const predictWebcam = () => {
+        if (!handLandmarkerRef.current || !videoRef.current || inputModeRef.current !== 'camera') return;
+        const video = videoRef.current;
+        if (video.readyState < 2 || video.videoWidth === 0) return;
+
+        // PERFORMANCE: Throttle Prediction (Max ~20 FPS)
+        const now = Date.now();
+        if (now - lastPredictionTimeRef.current < 50) return; 
+        lastPredictionTimeRef.current = now;
+
+        try {
+            const result = handLandmarkerRef.current.detectForVideo(video, now);
+            const canvas = document.getElementById('skeleton-canvas') as HTMLCanvasElement;
+            if (canvas && canvas.getContext('2d')) {
+                const ctx = canvas.getContext('2d')!;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                if (canvas.width !== video.videoWidth) canvas.width = video.videoWidth;
+                if (canvas.height !== video.videoHeight) canvas.height = video.videoHeight;
+                
+                if (result.landmarks && result.landmarks.length > 0) {
+                    // TAKE THE FIRST HAND DETECTED (One Hand Master)
+                    const landmarks = result.landmarks[0]; 
+
+                    // 1. Draw Skeleton
+                    ctx.lineWidth = 3; ctx.strokeStyle = '#FFD700'; ctx.fillStyle = '#FF4400';
+                    const connections = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+                    ctx.beginPath();
+                    connections.forEach(([s, e]) => {
+                        ctx.moveTo(landmarks[s].x * canvas.width, landmarks[s].y * canvas.height);
+                        ctx.lineTo(landmarks[e].x * canvas.width, landmarks[e].y * canvas.height);
+                    });
+                    ctx.stroke();
+
+                    // 2. Geometry Helpers
+                    const dist = (i1: number, i2: number) => {
+                        const dx = landmarks[i1].x - landmarks[i2].x;
+                        const dy = landmarks[i1].y - landmarks[i2].y;
+                        const dz = landmarks[i1].z - landmarks[i2].z;
+                        return Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    };
+                    const isExt = (tip: number, pip: number) => dist(0, tip) > dist(0, pip) * 1.1;
+
+                    const thumbOpen = isExt(4, 2);
+                    const indexOpen = isExt(8, 6);
+                    const midOpen = isExt(12, 10);
+                    const ringOpen = isExt(16, 14);
+                    const pinkyOpen = isExt(20, 18);
+                    const extendedCount = (thumbOpen?1:0)+(indexOpen?1:0)+(midOpen?1:0)+(ringOpen?1:0)+(pinkyOpen?1:0);
+
+                    // 3. Classify Gestures
+                    // Relaxed Fist: Ignore thumb (often unreliable in fist). Check if 4 fingers are closed.
+                    const isFist = !indexOpen && !midOpen && !ringOpen && !pinkyOpen;
+                    const isOpen = extendedCount === 5;
+                    const isPointing = indexOpen && !midOpen && !ringOpen && !pinkyOpen;
+                    const isVictory = indexOpen && midOpen && !ringOpen && !pinkyOpen;
+                    const isThreeFinger = indexOpen && midOpen && ringOpen && !pinkyOpen;
+                    const pinchDist = dist(4, 8);
+                    const isPinch = pinchDist < 0.05;
+
+                    let status = "AI: ";
+
+                    // 4. ZOOM (Only active when Pointing)
+                    if (isPointing) {
+                        status += "☝️ Point (Zoom)";
+                        const handSize = dist(0, 12); // Wrist to Mid Tip
+                        if (cameraRef.current) {
+                            // Larger hand (closer) = Zoom In (small Z)
+                            // Smaller hand (farther) = Zoom Out (large Z)
+                            let targetZ = 250 - (handSize * 600);
+                            targetZ = Math.max(30, Math.min(220, targetZ));
+                            cameraRef.current.position.z = THREE.MathUtils.lerp(cameraRef.current.position.z, targetZ, 0.05);
+                        }
+                    }
+
+                    // 5. ROTATION (Virtual Joystick using Fist)
+                    if (isFist) {
+                        status += "✊ Fist (Spin)";
+                        if (appStateRef.current !== AppState.TREE) setAppState(AppState.TREE);
+                        
+                        // Virtual Joystick Logic
+                        // Center of screen (0.5) = 0 velocity
+                        const palmX = landmarks[9].x; 
+                        const deviation = palmX - 0.5; // -0.5 to 0.5
+                        
+                        // Deadzone
+                        if (Math.abs(deviation) > 0.05) {
+                            rotationVelocityRef.current = -deviation * 0.2; // Speed multiplier
+                            if (mainGroupRef.current) mainGroupRef.current.rotation.y += rotationVelocityRef.current;
+                        }
+                    } 
+                    // 6. SCATTER (Strict 5 Fingers)
+                    else if (isOpen) {
+                        status += "🖐 Open (Scatter)";
+                        if (appStateRef.current !== AppState.SCATTER) setAppState(AppState.SCATTER);
+                    }
+                    // 7. PINCH (Select - Only when Pointing or just pinch)
+                    else if (isPinch) {
+                            status += "👌 Pinch (Select)";
+                            if (!gestureStateRef.current.isPinching) {
+                                playBellSound();
+                                if (containerRef.current) {
+                                    const rect = containerRef.current.getBoundingClientRect();
+                                    // NOTE: Selfie mode mirror logic means X is flipped for interaction
+                                    const rawX = (landmarks[4].x + landmarks[8].x) / 2;
+                                    const rawY = (landmarks[4].y + landmarks[8].y) / 2;
+                                    // Flip X for logic mapping
+                                    const screenX = (1 - rawX) * rect.width + rect.left;
+                                    const screenY = rawY * rect.height + rect.top;
+                                    handlePhotoClick(screenX, screenY);
+                                }
+                            }
+                            gestureStateRef.current.isPinching = true;
+                    } 
+                    // 8. VICTORY (Easter Egg)
+                    else if (isVictory) {
+                        status += `✌️ Victory (${Math.floor(gestureStateRef.current.victoryTimer)}s)`;
+                        gestureStateRef.current.victoryTimer += 0.03;
+                            if (gestureStateRef.current.victoryTimer > 2.0 && !isEpicSequenceRef.current) {
+                                hasTriggeredEpicRef.current = true;
+                                isEpicSequenceRef.current = true;
+                                epicTimerRef.current = 0;
+                                playWeWishYou();
+                                setBlessingCount(prev => prev + 1);
+                                rainbowStarModeRef.current = true;
+                                gestureStateRef.current.victoryTimer = 0;
+                        }
+                    }
+                    // 9. THREE FINGERS (Gold Mode)
+                    else if (isThreeFinger) {
+                        status += `🤟 Gold (${Math.floor(gestureStateRef.current.threeTimer)}s)`;
+                        gestureStateRef.current.threeTimer += 0.03;
+                        if (gestureStateRef.current.threeTimer > 3.0) {
+                            isGoldModeRef.current = true;
+                            goldModeTimerRef.current = 8.0; 
+                            playJingleBells(); // Changed to Jingle Bells
+                            gestureStateRef.current.threeTimer = 0;
+                        }
+                    }
+                    else {
+                        status += "Tracing...";
+                        gestureStateRef.current.isPinching = false;
+                        gestureStateRef.current.victoryTimer = 0;
+                        gestureStateRef.current.threeTimer = 0;
+                    }
+
+                    setStatusText(status);
+
+                    // Draw Cursor (Index Finger Tip)
+                    const cursorX = (1 - landmarks[8].x) * canvas.width; // Mirror X
+                    const cursorY = landmarks[8].y * canvas.height;
+                    ctx.beginPath();
+                    ctx.arc(cursorX, cursorY, 8, 0, 2*Math.PI);
+                    ctx.fillStyle = isPinch ? '#00FF00' : '#FFFFFF';
+                    ctx.fill();
+                    ctx.strokeStyle = '#000000';
+                    ctx.stroke();
+
+                } else {
+                    setStatusText("AI: 寻找手掌...");
+                }
+            }
+        } catch(e) {}
+    };
+
+    // --- Animation Loop ---
+    const spawnFirework = (colorOverride?: number, type: 'normal' | 'snow' = 'normal') => {
+        const colors = colorOverride ? [colorOverride] : [0xff0000, 0xffd700, 0x00ff00];
+        const color = colors[Math.floor(Math.random() * colors.length)];
+        const cx = (Math.random() - 0.5) * 40;
+        const cy = 20; 
+        const cz = (Math.random() - 0.5) * 40;
+        
+        const rocket = {
+            pos: new THREE.Vector3(cx, -30, cz),
+            vel: new THREE.Vector3(0, 1.5 + Math.random(), 0),
+            targetY: 40 + Math.random() * 20,
+            life: 1.0,
+            color: color,
+            isRocket: true,
+            type: type
+        };
+        logicDataRef.current.fireworks.push(rocket);
+    };
+
+    const explodeFirework = (rocket: any) => {
+        const count = rocket.type === 'snow' ? 60 : 30;
+        for(let i=0; i<count; i++) {
+            logicDataRef.current.fireworks.push({
+                pos: rocket.pos.clone(),
+                vel: new THREE.Vector3((Math.random()-0.5), (Math.random()-0.5), (Math.random()-0.5)).normalize().multiplyScalar(0.5 + Math.random()),
+                life: rocket.type === 'snow' ? 3.0 : 1.0,
+                color: rocket.type === 'snow' ? 0xFFFFFF : rocket.color, 
+                type: rocket.type,
+                isParticle: true
+            });
+        }
+    };
+
+    const updateInstancedSystem = (dataArray: any[], group: THREE.Group, state: AppState, type: string) => {
+        const mesh = group.children.find(c => c.name === type) as THREE.InstancedMesh;
+        if (!mesh) return;
+
+        // PERFORMANCE: Use pooled objects
+        const dummy = tempRef.current.dummy;
+        const vec3A = tempRef.current.vec3A;
+        
+        const isGold = isGoldModeRef.current;
+        const isEpic = isEpicSequenceRef.current;
+        const epicTime = epicTimerRef.current;
+        const repelPos = repulsionPointRef.current;
+
+        const mat = mesh.material as THREE.MeshPhysicalMaterial;
+        
+        const formingText = isEpic && epicTime > 4.0 && epicTime < 16.0;
+        const textTargets = logicDataRef.current.textTargets;
+        
+        if (formingText) {
+             if (type === 'gold') {
+                 mat.color.setHex(0xFFD700); 
+                 mat.emissive.setHex(0xFFAA00);
+                 mat.emissiveIntensity = 2.0 + Math.sin(timeRef.current * 5); 
+             } else if (type === 'silver' || type === 'gem') {
+                 mat.color.setHex(0xD40000); 
+                 mat.emissive.setHex(0xFF0000); 
+                 mat.emissiveIntensity = 1.0 + Math.sin(timeRef.current * 8); 
+             } else {
+                 mat.emissiveIntensity = 0.1;
+             }
+        } else if (isGold || (isEpic && epicTime < 3.0)) {
+            mat.emissive.setHex(0xFFAA00);
+            mat.emissiveIntensity = 2.0;
+        } else {
+            mat.color.setHex(type === 'gold' ? 0xffaa00 : type === 'silver' ? 0xeeeeee : type === 'gem' ? 0xff0044 : 0x00aa55);
+            mat.emissive.setHex(mesh.userData.origEmissive || 0x000000);
+            mat.emissiveIntensity = mesh.userData.origEmissiveIntensity || 0.1;
+        }
+
+        const invWorldMatrix = tempRef.current.mat4;
+        if (repelPos) {
+           invWorldMatrix.copy(group.matrixWorld).invert();
+        }
+
+        for (let i = 0; i < dataArray.length; i++) {
+            const item = dataArray[i];
+            let target = state === AppState.TREE ? item.treePos : item.scatterPos;
+            if (state === AppState.ZOOM) target = item.scatterPos;
+
+            if (formingText && textTargets) {
+                if (type === 'gold' && textTargets.gold.length > 0) {
+                    target = textTargets.gold[i % textTargets.gold.length];
+                } 
+                else if ((type === 'silver' || type === 'gem') && textTargets.silver.length > 0) {
+                    target = textTargets.silver[i % textTargets.silver.length];
+                }
+            }
+
+            if (repelPos && state === AppState.TREE && !isEpic) {
+                // PERFORMANCE: Optimized math without allocation
+                vec3A.copy(repelPos).applyMatrix4(invWorldMatrix);
+                if (item.currentPos.distanceTo(vec3A) < 18.0) {
+                    // pushDir = current - repel
+                    vec3A.copy(item.currentPos).sub(vec3A).normalize().multiplyScalar(0.2);
+                    item.currentPos.add(vec3A);
+                }
+            }
+
+            const speed = formingText ? 0.08 : 0.05;
+            item.currentPos.lerp(target, speed);
+            item.rotation.x += item.rotSpeed.x;
+            item.rotation.y += item.rotSpeed.y;
+
+            dummy.position.copy(item.currentPos);
+            dummy.rotation.copy(item.rotation);
+            let s = item.scale;
+            if (state === AppState.ZOOM) s *= 0.5;
+            if (formingText) s *= 0.8; 
+            dummy.scale.setScalar(s);
+            dummy.updateMatrix();
+            mesh.setMatrixAt(i, dummy.matrix);
+        }
+        mesh.instanceMatrix.needsUpdate = true;
+    };
+
+    const updateDustParticles = (state: AppState) => {
+        const dustSystem = mainGroup.children.find(c => (c as any).userData.isDust) as THREE.Points;
+        if(!dustSystem) return;
+        const positions = dustSystem.geometry.attributes.position.array as Float32Array;
+        const speedBoost = interactionRef.current.touches >= 3 ? 5.0 : 1.0;
+        for(let i=0; i<logicDataRef.current.dust.length; i++) {
+            const item = logicDataRef.current.dust[i];
+            if (state === AppState.TREE) {
+                item.currentPos.y += 0.05 * speedBoost;
+                if(item.currentPos.y > CONFIG.treeHeight/2) item.currentPos.y = -CONFIG.treeHeight/2;
+                const normH = (item.currentPos.y + CONFIG.treeHeight/2) / CONFIG.treeHeight;
+                const rMax = CONFIG.maxRadius * (1-normH) + 2;
+                // Simple distance check squared to avoid sqrt
+                const distSq = item.currentPos.x**2 + item.currentPos.z**2;
+                if(distSq > rMax * rMax) {
+                    item.currentPos.x *= 0.98;
+                    item.currentPos.z *= 0.98;
+                }
+            } else {
+                item.currentPos.lerp(item.scatterPos, 0.05);
+            }
+            positions[i*3] = item.currentPos.x;
+            positions[i*3+1] = item.currentPos.y;
+            positions[i*3+2] = item.currentPos.z;
+        }
+        dustSystem.geometry.attributes.position.needsUpdate = true;
+    };
+
+    const updateFireworks = () => {
+        let fwSystem = mainGroup.children.find(c => c.name === 'fireworks') as THREE.Points;
+        if (!fwSystem) {
+            const geo = new THREE.BufferGeometry();
+            const mat = new THREE.PointsMaterial({ size: 1.5, vertexColors: true, blending: THREE.AdditiveBlending, transparent: true });
+            fwSystem = new THREE.Points(geo, mat);
+            fwSystem.name = 'fireworks';
+            mainGroup.add(fwSystem);
+        }
+        const activeFW = logicDataRef.current.fireworks;
+        fwSystem.visible = activeFW.length > 0;
+        if (!fwSystem.visible) return;
+
+        const positions = [];
+        const colors = [];
+        for (let i = activeFW.length - 1; i >= 0; i--) {
+            const p = activeFW[i];
+            if (p.isRocket) {
+                p.pos.add(p.vel);
+                if (p.pos.y >= p.targetY) {
+                    explodeFirework(p);
+                    activeFW.splice(i, 1);
+                } else {
+                    positions.push(p.pos.x, p.pos.y, p.pos.z);
+                    const c = new THREE.Color(p.color);
+                    colors.push(c.r, c.g, c.b);
+                }
+                continue;
+            }
+            p.life -= 0.01;
+            p.pos.add(p.vel);
+            if (p.type === 'snow') {
+                p.vel.multiplyScalar(0.95);
+                p.vel.y -= 0.005;
+                p.pos.lerp(new THREE.Vector3(0, -CONFIG.treeHeight/2, 0), 0.005);
+            } else {
+                p.vel.y -= 0.01;
+            }
+            if (p.life <= 0) {
+                activeFW.splice(i, 1);
+            } else {
+                positions.push(p.pos.x, p.pos.y, p.pos.z);
+                const c = new THREE.Color(p.color);
+                colors.push(c.r, c.g, c.b);
+            }
+        }
+        fwSystem.geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        fwSystem.geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+        fwSystem.geometry.computeBoundingSphere();
+    };
+
+    const updateRibbon = (state: AppState) => {
+        const ribbon = logicDataRef.current.ribbon;
+        if (ribbon) {
+            ribbon.visible = settingsRef.current.ribbonVisible;
+            if (!ribbon.visible) return;
+            const isEpic = isEpicSequenceRef.current;
+            const time = timeRef.current;
+            const mat = ribbon.material as THREE.MeshStandardMaterial;
+
+            if (isEpic) {
+                const epicProgress = Math.min(epicTimerRef.current / 3.0, 1.0);
+                const t = THREE.MathUtils.smoothstep(epicProgress, 0, 1);
+                if (ribbon.morphTargetInfluences) ribbon.morphTargetInfluences[0] = t;
+                ribbon.rotation.set(0, 0, 0); 
+                ribbon.scale.set(1, 1, 1);
+                ribbon.position.set(0, 5, 0); 
+                mat.emissive.setHex(0xFFD700);
+                mat.emissiveIntensity = 1.0 + Math.sin(time * 5.0) * 0.5;
+                mat.opacity = 0.9;
+                if (cameraRef.current) {
+                     const cam = cameraRef.current;
+                     const aspect = cam.aspect;
+                     const vFOV = cam.fov * Math.PI / 180;
+                     const targetDistH = 50 / Math.tan(vFOV / 2);
+                     const targetDistW = 90 / (aspect * Math.tan(vFOV / 2));
+                     const targetZ = Math.max(targetDistH, targetDistW, 110);
+                     cam.position.z = THREE.MathUtils.lerp(cam.position.z, targetZ, 0.05);
+                }
+            } else {
+                if (ribbon.morphTargetInfluences) ribbon.morphTargetInfluences[0] = THREE.MathUtils.lerp(ribbon.morphTargetInfluences[0], 0, 0.1);
+                const waveSpeed = 0.5;
+                const waveAmp = 1.5;
+                ribbon.position.set(0, Math.sin(time * waveSpeed) * waveAmp, 0);
+                ribbon.scale.lerp(new THREE.Vector3(1,1,1), 0.05);
+                if(ribbon.userData.texture) ribbon.userData.texture.offset.x -= 0.002;
+                mat.emissive.setHex(0x550000);
+                mat.emissiveIntensity = 0.2;
+                mat.opacity = THREE.MathUtils.lerp(mat.opacity, state === AppState.ZOOM ? 0.1 : 0.6, 0.05);
+            }
+        }
+    };
+
+    const updateStar = (state: AppState) => {
+        const star = logicDataRef.current.star;
+        if (star) {
+            let target = state === AppState.TREE ? star.userData.treePos : star.userData.scatterPos;
+            star.position.lerp(target, 0.05);
+            star.rotation.y += 0.01;
+            if (rainbowStarModeRef.current) {
+                const hue = (timeRef.current * 0.1) % 1;
+                const starMesh = star as THREE.Mesh;
+                if (starMesh.material) {
+                    (starMesh.material as THREE.MeshPhysicalMaterial).emissive.setHSL(hue, 1, 0.5);
+                    (starMesh.material as THREE.MeshPhysicalMaterial).emissiveIntensity = 2.0;
+                }
+            }
+        }
+    };
+
+    const updatePhotos = (state: AppState) => {
+        photoMeshesRef.current.forEach((group: any, idx) => {
+            let targetPos, targetScale = 1.0; 
+            if (state === AppState.ZOOM && idx === zoomTargetIndexRef.current) {
+                targetPos = mainGroup.worldToLocal(new THREE.Vector3(0, 0, 80));
+                targetScale = 3.5;
+                group.lookAt(camera.position); 
+            } else if (state === AppState.SCATTER) {
+                targetScale = 2.0; 
+                group.lookAt(camera.position);
+                targetPos = group.userData.scatterPos;
+            } else {
+                targetPos = group.userData.treePos;
+                group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, group.userData.baseRot.x, 0.1);
+                group.rotation.y = group.userData.baseRot.y + timeRef.current * 0.5; 
+                group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, group.userData.baseRot.z, 0.1);
+            }
+            group.position.lerp(targetPos, 0.1);
+            group.scale.lerp(new THREE.Vector3(targetScale, targetScale, targetScale), 0.1);
+        });
+    };
+
+    const animate = () => {
+        requestRef.current = requestAnimationFrame(animate);
+        timeRef.current += 0.016;
+        
+        // MediaPipe Check
+        predictWebcam();
+        
+        const state = appStateRef.current;
+        const group = mainGroup;
+
+        // Holding Star Logic (Only touch)
+        if (isHoldingStarRef.current && !isEpicSequenceRef.current) {
+            if (inputModeRef.current === 'touch' && starHoldStartTimeRef.current > 0) {
+                 const holdTime = Date.now() - starHoldStartTimeRef.current;
+                 const progress = Math.min(holdTime / 3000, 1.0);
+                 setHoldProgress(progress);
+                 if (progress >= 1.0 && !hasTriggeredEpicRef.current) {
+                    hasTriggeredEpicRef.current = true;
+                    isEpicSequenceRef.current = true;
+                    epicTimerRef.current = 0;
+                    playWeWishYou();
+                    setBlessingCount(prev => prev + 1);
+                    rainbowStarModeRef.current = true;
+                    setHoldProgress(0);
+                 }
+            }
+        } else if (!isEpicSequenceRef.current) {
+            // Reset if not handled by gesture logic
+        }
+
+        if (isEpicSequenceRef.current) {
+            epicTimerRef.current += 0.016;
+            const t = epicTimerRef.current;
+            if (group.rotation.y > Math.PI) group.rotation.y -= 2 * Math.PI;
+            if (group.rotation.y < -Math.PI) group.rotation.y += 2 * Math.PI;
+            group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, 0.05);
+            group.rotation.y = THREE.MathUtils.lerp(group.rotation.y, 0, 0.05);
+            group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, 0, 0.05);
+            rotationVelocityRef.current = 0;
+            if (t < 3.0) group.scale.setScalar(1.0 + Math.sin(t * Math.PI * 2) * 0.1);
+            else group.scale.setScalar(1.0);
+            if (t > 3.0 && t < 6.0 && Math.random() < 0.1) {
+                const warmColors = [0xFFD700, 0xFFA500, 0xFF4500];
+                const c = warmColors[Math.floor(Math.random()*warmColors.length)];
+                spawnFirework(c, 'snow');
+            }
+            if (t > 18.0) {
+                isEpicSequenceRef.current = false;
+                setAppState(AppState.TREE);
+            }
+        }
+
+        if (state !== AppState.ZOOM && interactionRef.current.touches !== 2 && !isGoldModeRef.current && !isEpicSequenceRef.current && (inputModeRef.current === 'touch')) {
+            group.rotation.y += rotationVelocityRef.current;
+            rotationVelocityRef.current *= 0.95; 
+            if (settingsRef.current.rotationEnabled && Math.abs(rotationVelocityRef.current) < 0.0005 && state === AppState.TREE) {
+                group.rotation.y += 0.002;
+            }
+        }
+        if (shakeIntensityRef.current > 0) {
+            group.position.x = (Math.random() - 0.5) * shakeIntensityRef.current;
+            group.position.y = (Math.random() - 0.5) * shakeIntensityRef.current;
+            shakeIntensityRef.current *= 0.9;
+        } else {
+            group.position.set(0,0,0);
+        }
+
+        if (interactionRef.current.touches === 4 && (Date.now() - interactionRef.current.startTime) > 500 && Math.random() < 0.1) spawnFirework(undefined, 'normal');
+
+        updateInstancedSystem(logicDataRef.current.gold, group, state, 'gold');
+        updateInstancedSystem(logicDataRef.current.silver, group, state, 'silver');
+        updateInstancedSystem(logicDataRef.current.gem, group, state, 'gem');
+        updateInstancedSystem(logicDataRef.current.emerald, group, state, 'emerald');
+        updateDustParticles(state);
+        updatePhotos(state);
+        updateRibbon(state);
+        updateStar(state);
+        updateFireworks();
+
+        composer.render();
+    };
+
+    animate();
+
+    const onWindowResize = () => {
+        if (!containerRef.current || !cameraRef.current || !rendererRef.current) return;
+        const width = containerRef.current.clientWidth;
+        const height = containerRef.current.clientHeight;
+        cameraRef.current.aspect = width / height;
+        cameraRef.current.updateProjectionMatrix();
+        rendererRef.current.setSize(width, height);
+        composer.setSize(width, height);
+    };
+    window.addEventListener('resize', onWindowResize);
+
+    return () => {
+        window.removeEventListener('resize', onWindowResize);
+        if (requestRef.current) cancelAnimationFrame(requestRef.current);
+        if (containerRef.current && renderer.domElement) containerRef.current.removeChild(renderer.domElement);
+        renderer.dispose();
+    };
+  }, []); 
+
+  const initAudio = () => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    if (audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume();
+    }
+  };
+
+  const playBellSound = () => {
+    if (!settingsRef.current.soundEnabled) return;
+    initAudio();
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const partials = [1, 2, 3, 4.2];
+    const baseFreq = 880; 
+    partials.forEach((partial, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(baseFreq * partial, t);
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.1 / (i + 1), t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 1.5);
+    });
+  };
+
+  const playJingleBells = () => {
+    if (!settingsRef.current.soundEnabled) return;
+    initAudio();
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const notes = [
+      { f: 329.63, d: 0.2, t: 0 }, { f: 329.63, d: 0.2, t: 0.25 }, { f: 329.63, d: 0.4, t: 0.5 },
+      { f: 329.63, d: 0.2, t: 1.0 }, { f: 329.63, d: 0.2, t: 1.25 }, { f: 329.63, d: 0.4, t: 1.5 },
+      { f: 329.63, d: 0.2, t: 2.0 }, { f: 392.00, d: 0.2, t: 2.25 }, { f: 261.63, d: 0.2, t: 2.5 }, { f: 293.66, d: 0.2, t: 2.75 }, { f: 329.63, d: 0.8, t: 3.0 }
+    ];
+    notes.forEach(n => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = n.f;
+      const startTime = ctx.currentTime + n.t;
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(0.3, startTime + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.01, startTime + n.d);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + n.d);
+    });
+  };
+
+  const playWeWishYou = () => {
+    if (!settingsRef.current.soundEnabled) return;
+    initAudio();
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const melody = [
+      {f: 261.63, t:0, d:0.4}, {f: 349.23, t:0.4, d:0.4}, {f: 349.23, t:0.8, d:0.2}, {f: 392.00, t:1.0, d:0.2}, {f: 349.23, t:1.2, d:0.2}, {f: 329.63, t:1.4, d:0.2},
+      {f: 293.66, t:1.6, d:0.4}, {f: 293.66, t:2.0, d:0.4}, {f: 293.66, t:2.4, d:0.4}, {f: 392.00, t:2.8, d:0.4}, {f: 392.00, t:3.2, d:0.2}, {f: 440.00, t:3.4, d:0.2},
+      {f: 392.00, t:3.6, d:0.2}, {f: 349.23, t:3.8, d:0.2}, {f: 329.63, t:4.0, d:0.4}, {f: 261.63, t:4.4, d:0.4}, {f: 261.63, t:4.8, d:0.4},
+      {f: 440.00, t:5.2, d:0.4}, {f: 440.00, t:5.6, d:0.2}, {f: 493.88, t:5.8, d:0.2}, {f: 440.00, t:6.0, d:0.2}, {f: 392.00, t:6.2, d:0.2}, {f: 349.23, t:6.4, d:0.4},
+      {f: 293.66, t:6.8, d:0.4}, {f: 261.63, t:7.2, d:0.2}, {f: 261.63, t:7.4, d:0.2}, {f: 293.66, t:7.6, d:0.4}, {f: 392.00, t:8.0, d:0.4}, {f: 329.63, t:8.4, d:0.4},
+      {f: 349.23, t:8.8, d:1.5}
+    ];
+    melody.forEach(n => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.value = n.f;
+        const osc2 = ctx.createOscillator();
+        osc2.type = 'triangle';
+        osc2.frequency.value = n.f + 1.5;
+        osc2.connect(gain);
+        gain.gain.setValueAtTime(0, ctx.currentTime + n.t);
+        gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + n.t + 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + n.t + n.d);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + n.t);
+        osc.stop(ctx.currentTime + n.t + n.d);
+        osc2.start(ctx.currentTime + n.t);
+        osc2.stop(ctx.currentTime + n.t + n.d);
+    });
+  };
+
+  const addPhotoMesh = (img: HTMLImageElement) => {
+    if (!mainGroupRef.current) return;
+    const tex = new THREE.Texture(img);
+    tex.needsUpdate = true;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    
+    let w = 4, h = 4;
+    if(img.width > img.height) h = 4 * (img.height/img.width); 
+    else w = 4 * (img.width/img.height);
+    
+    const photoGeo = new THREE.PlaneGeometry(w, h);
+    const photoMat = new THREE.MeshStandardMaterial({ 
+        map: tex, 
+        side: THREE.DoubleSide,
+        roughness: 0.5,
+        metalness: 0,
+        emissive: 0x000000 
+    });
+    const photoMesh = new THREE.Mesh(photoGeo, photoMat);
+    photoMesh.position.z = 0.06; 
+    photoMesh.castShadow = true;
+    photoMesh.receiveShadow = true;
+
+    const frameGeo = new THREE.BoxGeometry(w + 0.5, h + 0.8, 0.1);
+    const frameMat = new THREE.MeshStandardMaterial({ 
+        color: 0xFFFFFF, 
+        roughness: 0.4, 
+        metalness: 0.1,
+        emissive: 0x222222, 
+        emissiveIntensity: 0.2
+    });
+    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+    frameMesh.castShadow = true;
+    frameMesh.receiveShadow = true;
+    
+    const group = new THREE.Group();
+    group.add(frameMesh);
+    group.add(photoMesh);
+    
+    const h_pos = (Math.random() - 0.5) * CONFIG.treeHeight;
+    const normH = (h_pos + CONFIG.treeHeight/2) / CONFIG.treeHeight;
+    const maxR = CONFIG.maxRadius * (1 - normH);
+    const r = maxR + 2 + Math.random() * 5; 
+    const theta = Math.random() * Math.PI * 2;
+    const treePos = new THREE.Vector3(r * Math.cos(theta), h_pos, r * Math.sin(theta));
+    const scatterPos = new THREE.Vector3(r * Math.sin(Math.acos(2 * Math.random() - 1)) * Math.cos(2 * Math.PI * Math.random()), r * Math.sin(Math.acos(2 * Math.random() - 1)) * Math.sin(2 * Math.PI * Math.random()), r * Math.cos(Math.acos(2 * Math.random() - 1)));
+
+    group.lookAt(new THREE.Vector3(0, h_pos, 0)); 
+    const baseRot = group.rotation.clone();
+
+    group.userData = { treePos, scatterPos, baseRot, isPhoto: true };
+    group.position.copy(treePos);
+    
+    photoMeshesRef.current.push(group);
+    mainGroupRef.current.add(group);
+  };
+
+  const handleTouch = (e: React.TouchEvent | React.MouseEvent, type: 'start' | 'move' | 'end') => {
+      // Disable touch interaction if in Camera Mode, unless it's UI click
+      if (inputModeRef.current === 'camera') return;
+
+      initAudio();
+      
+      const isTouch = 'touches' in e;
+      const touches = isTouch ? (e as React.TouchEvent).touches : [];
+      const touchCount = isTouch ? touches.length : ((e as React.MouseEvent).buttons === 1 ? 1 : 0);
+      
+      interactionRef.current.touches = touchCount;
+
+      if (type === 'start') {
+          interactionRef.current.startTime = Date.now();
+          const positions = [];
+          if (isTouch) {
+              for(let i=0; i<touches.length; i++) positions.push({x: touches[i].clientX, y: touches[i].clientY});
+          } else {
+              positions.push({x: (e as React.MouseEvent).clientX, y: (e as React.MouseEvent).clientY});
+          }
+          interactionRef.current.startPositions = positions;
+          
+          if (touchCount === 2) {
+              const dx = touches[0].clientX - touches[1].clientX;
+              const dy = touches[0].clientY - touches[1].clientY;
+              interactionRef.current.lastDistance = Math.sqrt(dx*dx + dy*dy);
+              interactionRef.current.lastAngle = Math.atan2(dy, dx);
+          }
+          rotationVelocityRef.current = 0;
+
+          if (touchCount === 1) {
+              const cx = positions[0].x;
+              const cy = positions[0].y;
+              if (containerRef.current && cameraRef.current) {
+                  const rect = containerRef.current.getBoundingClientRect();
+                  const x = ((cx - rect.left) / rect.width) * 2 - 1;
+                  const y = -((cy - rect.top) / rect.height) * 2 + 1;
+                  raycasterRef.current.setFromCamera(new THREE.Vector2(x,y), cameraRef.current);
+                  
+                  if (logicDataRef.current.star) {
+                      const intersects = raycasterRef.current.intersectObject(logicDataRef.current.star);
+                      if (intersects.length > 0) {
+                          isHoldingStarRef.current = true;
+                          starHoldStartTimeRef.current = Date.now();
+                          setTouchPos({x: cx, y: cy});
+                      }
+                  }
+              }
+          }
+      }
+
+      if (type === 'move') {
+          if (touchCount === 1) {
+              const cx = isTouch ? touches[0].clientX : (e as React.MouseEvent).clientX;
+              const cy = isTouch ? touches[0].clientY : (e as React.MouseEvent).clientY;
+              
+              if (isHoldingStarRef.current) {
+                   setTouchPos({x: cx, y: cy});
+              }
+
+              if (containerRef.current && cameraRef.current) {
+                const rect = containerRef.current.getBoundingClientRect();
+                const x = ((cx - rect.left) / rect.width) * 2 - 1;
+                const y = -((cy - rect.top) / rect.height) * 2 + 1;
+                raycasterRef.current.setFromCamera(new THREE.Vector2(x, y), cameraRef.current);
+                
+                const intersection = new THREE.Vector3();
+                raycasterRef.current.ray.intersectPlane(planeRef.current, intersection);
+                repulsionPointRef.current = intersection;
+              }
+          } else if (touchCount === 2 && isTouch) {
+              const dx = touches[0].clientX - touches[1].clientX;
+              const dy = touches[0].clientY - touches[1].clientY;
+              const dist = Math.sqrt(dx*dx + dy*dy);
+              const angle = Math.atan2(dy, dx);
+              
+              const dDist = dist - interactionRef.current.lastDistance;
+              
+              let dAngle = angle - interactionRef.current.lastAngle;
+              if (dAngle > Math.PI) dAngle -= 2 * Math.PI;
+              else if (dAngle < -Math.PI) dAngle += 2 * Math.PI;
+              
+              if (cameraRef.current) {
+                  cameraRef.current.position.z -= dDist * 0.15;
+                  cameraRef.current.position.z = Math.max(20, Math.min(200, cameraRef.current.position.z));
+              }
+              
+              if (mainGroupRef.current) {
+                  mainGroupRef.current.rotation.y += dAngle * 2.0; 
+                  rotationVelocityRef.current = dAngle * 0.5;
+              }
+
+              interactionRef.current.lastDistance = dist;
+              interactionRef.current.lastAngle = angle;
+          }
+      }
+
+      if (type === 'end') {
+          repulsionPointRef.current = null;
+          isHoldingStarRef.current = false;
+          setHoldProgress(0);
+
+          if (Date.now() - interactionRef.current.startTime < 300) {
+             const lastCount = interactionRef.current.startPositions.length;
+             
+             if (lastCount === 1) {
+                 const now = Date.now();
+                 if (now - interactionRef.current.lastTapTime < 300) {
+                     shakeIntensityRef.current = 5.0;
+                 } else {
+                     playBellSound(); 
+                     const pos = interactionRef.current.startPositions[0];
+                     handlePhotoClick(pos.x, pos.y);
+                 }
+                 interactionRef.current.lastTapTime = now;
+             } else if (lastCount === 2) {
+                 setAppState(prev => prev === AppState.TREE ? AppState.SCATTER : AppState.TREE);
+             }
+          }
+          if (touchCount === 5) {
+             isGoldModeRef.current = true;
+             goldModeTimerRef.current = 8.0; 
+             playJingleBells();
+          }
+      }
+  };
+
+  const handlePhotoClick = (cx: number, cy: number) => {
+      if (!containerRef.current || !cameraRef.current || !mainGroupRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = ((cx - rect.left) / rect.width) * 2 - 1;
+      const y = -((cy - rect.top) / rect.height) * 2 + 1;
+      raycasterRef.current.setFromCamera(new THREE.Vector2(x,y), cameraRef.current);
+      const intersects = raycasterRef.current.intersectObjects(photoMeshesRef.current, true);
+      if (intersects.length > 0) {
+          let targetObj = intersects[0].object;
+          while(targetObj.parent && targetObj.parent !== mainGroupRef.current) targetObj = targetObj.parent;
+          const index = photoMeshesRef.current.indexOf(targetObj);
+          if (index !== -1) {
+              zoomTargetIndexRef.current = index;
+              setAppState(AppState.ZOOM);
+          }
+      }
+  };
+
+  return (
+    <div 
+        ref={containerRef} 
+        className="w-full h-full cursor-pointer"
+        onMouseDown={(e) => handleTouch(e, 'start')}
+        onMouseMove={(e) => handleTouch(e, 'move')}
+        onMouseUp={(e) => handleTouch(e, 'end')}
+        onMouseLeave={(e) => handleTouch(e, 'end')}
+        onTouchStart={(e) => handleTouch(e, 'start')}
+        onTouchMove={(e) => handleTouch(e, 'move')}
+        onTouchEnd={(e) => handleTouch(e, 'end')}
+    />
+  );
+};
+
+export default JewelTreeScene;
