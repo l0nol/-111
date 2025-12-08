@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
@@ -10,10 +9,10 @@ import { AppState, AppSettings, InputMode } from '../App';
 
 // Configuration - Further optimized for mobile performance
 const CONFIG = {
-  goldCount: 500,     
-  silverCount: 500,   
-  gemCount: 200,      
-  emeraldCount: 200,  
+  goldCount: 1500,     
+  silverCount: 1500,   
+  gemCount: 500,      
+  emeraldCount: 500,  
   dustCount: 600,     
   treeHeight: 75,
   maxRadius: 30
@@ -55,6 +54,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const mainGroupRef = useRef<THREE.Group | null>(null);
+  const bloomPassRef = useRef<UnrealBloomPass | null>(null);
   
   // Performance Optimization Refs (Object Reuse)
   const tempRef = useRef({
@@ -74,6 +74,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     dust: [] as any[],
     star: null as THREE.Mesh | null,
     ribbon: null as THREE.Mesh | null,
+    tyndallBeams: null as THREE.InstancedMesh | null, // Dynamic beams
+    tyndallIndices: [] as number[], // Indices of gold particles that emit beams
     fireworks: [] as any[],
     textTargets: null as { gold: THREE.Vector3[], silver: THREE.Vector3[] } | null
   });
@@ -120,6 +122,202 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
   const appStateRef = useRef(appState);
   const settingsRef = useRef(settings);
   const inputModeRef = useRef(inputMode);
+
+  // --- HELPER FUNCTIONS ---
+
+  const initAudio = () => {
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      if (audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume();
+      }
+    } catch(e) { console.warn("Audio init failed", e); }
+  };
+
+  const playBellSound = () => {
+    if (!settingsRef.current.soundEnabled) return;
+    initAudio();
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const t = ctx.currentTime;
+    const partials = [1, 2, 3, 4.2];
+    const baseFreq = 880; 
+    partials.forEach((partial, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(baseFreq * partial, t);
+        gain.gain.setValueAtTime(0, t);
+        gain.gain.linearRampToValueAtTime(0.1 / (i + 1), t + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 1.5);
+    });
+  };
+
+  const playJingleBells = () => {
+    if (!settingsRef.current.soundEnabled) return;
+    initAudio();
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const notes = [
+      { f: 329.63, d: 0.2, t: 0 }, { f: 329.63, d: 0.2, t: 0.25 }, { f: 329.63, d: 0.4, t: 0.5 },
+      { f: 329.63, d: 0.2, t: 1.0 }, { f: 329.63, d: 0.2, t: 1.25 }, { f: 329.63, d: 0.4, t: 1.5 },
+      { f: 329.63, d: 0.2, t: 2.0 }, { f: 392.00, d: 0.2, t: 2.25 }, { f: 261.63, d: 0.2, t: 2.5 }, { f: 293.66, d: 0.2, t: 2.75 }, { f: 329.63, d: 0.8, t: 3.0 }
+    ];
+    notes.forEach(n => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = n.f;
+      const startTime = ctx.currentTime + n.t;
+      gain.gain.setValueAtTime(0, startTime);
+      gain.gain.linearRampToValueAtTime(0.3, startTime + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.01, startTime + n.d);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(startTime);
+      osc.stop(startTime + n.d);
+    });
+  };
+
+  const playWeWishYou = () => {
+    if (!settingsRef.current.soundEnabled) return;
+    initAudio();
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const melody = [
+      {f: 261.63, t:0, d:0.4}, {f: 349.23, t:0.4, d:0.4}, {f: 349.23, t:0.8, d:0.2}, {f: 392.00, t:1.0, d:0.2}, {f: 349.23, t:1.2, d:0.2}, {f: 329.63, t:1.4, d:0.2},
+      {f: 293.66, t:1.6, d:0.4}, {f: 293.66, t:2.0, d:0.4}, {f: 293.66, t:2.4, d:0.4}, {f: 392.00, t:2.8, d:0.4}, {f: 392.00, t:3.2, d:0.2}, {f: 440.00, t:3.4, d:0.2},
+      {f: 392.00, t:3.6, d:0.2}, {f: 349.23, t:3.8, d:0.2}, {f: 329.63, t:4.0, d:0.4}, {f: 261.63, t:4.4, d:0.4}, {f: 261.63, t:4.8, d:0.4},
+      {f: 440.00, t:5.2, d:0.4}, {f: 440.00, t:5.6, d:0.2}, {f: 493.88, t:5.8, d:0.2}, {f: 440.00, t:6.0, d:0.2}, {f: 392.00, t:6.2, d:0.2}, {f: 349.23, t:6.4, d:0.4},
+      {f: 293.66, t:6.8, d:0.4}, {f: 261.63, t:7.2, d:0.2}, {f: 261.63, t:7.4, d:0.2}, {f: 293.66, t:7.6, d:0.4}, {f: 392.00, t:8.0, d:0.4}, {f: 329.63, t:8.4, d:0.4},
+      {f: 349.23, t:8.8, d:1.5}
+    ];
+    melody.forEach(n => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.value = n.f;
+        const osc2 = ctx.createOscillator();
+        osc2.type = 'triangle';
+        osc2.frequency.value = n.f + 1.5;
+        osc2.connect(gain);
+        gain.gain.setValueAtTime(0, ctx.currentTime + n.t);
+        gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + n.t + 0.1);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + n.t + n.d);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + n.t);
+        osc.stop(ctx.currentTime + n.t + n.d);
+        osc2.start(ctx.currentTime + n.t);
+        osc2.stop(ctx.currentTime + n.t + n.d);
+    });
+  };
+
+  // Centralized Trigger for Epic Sequence
+  const triggerEpicSequence = () => {
+    if (hasTriggeredEpicRef.current) return;
+    
+    hasTriggeredEpicRef.current = true;
+    isEpicSequenceRef.current = true;
+    epicTimerRef.current = 0;
+    rainbowStarModeRef.current = true;
+    
+    // Play Audio
+    playWeWishYou();
+    
+    // Increment Blessing
+    setBlessingCount(prev => prev + 1);
+    
+    // Reset any hold progress
+    setHoldProgress(0);
+    
+    // Visual Impact: Big Shake
+    shakeIntensityRef.current = 3.0;
+    setStatusText("🌟 圣诞快乐! 🌟");
+  };
+
+  const addPhotoMesh = (img: HTMLImageElement) => {
+    if (!mainGroupRef.current) return;
+    const tex = new THREE.Texture(img);
+    tex.needsUpdate = true;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    
+    let w = 4, h = 4;
+    if(img.width > img.height) h = 4 * (img.height/img.width); 
+    else w = 4 * (img.width/img.height);
+    
+    const photoGeo = new THREE.PlaneGeometry(w, h);
+    const photoMat = new THREE.MeshStandardMaterial({ 
+        map: tex, 
+        side: THREE.DoubleSide,
+        roughness: 0.5,
+        metalness: 0,
+        emissive: 0x000000 
+    });
+    const photoMesh = new THREE.Mesh(photoGeo, photoMat);
+    photoMesh.position.z = 0.06; 
+    photoMesh.castShadow = true;
+    photoMesh.receiveShadow = true;
+
+    const frameGeo = new THREE.BoxGeometry(w + 0.5, h + 0.8, 0.1);
+    const frameMat = new THREE.MeshStandardMaterial({ 
+        color: 0xFFFFFF, 
+        roughness: 0.4, 
+        metalness: 0.1,
+        emissive: 0x222222, 
+        emissiveIntensity: 0.2
+    });
+    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
+    frameMesh.castShadow = true;
+    frameMesh.receiveShadow = true;
+    
+    const group = new THREE.Group();
+    group.add(frameMesh);
+    group.add(photoMesh);
+    
+    const h_pos = (Math.random() - 0.5) * CONFIG.treeHeight;
+    const normH = (h_pos + CONFIG.treeHeight/2) / CONFIG.treeHeight;
+    const maxR = CONFIG.maxRadius * (1 - normH);
+    const r = maxR + 2 + Math.random() * 5; 
+    const theta = Math.random() * Math.PI * 2;
+    const treePos = new THREE.Vector3(r * Math.cos(theta), h_pos, r * Math.sin(theta));
+    const scatterPos = new THREE.Vector3(r * Math.sin(Math.acos(2 * Math.random() - 1)) * Math.cos(2 * Math.PI * Math.random()), r * Math.sin(Math.acos(2 * Math.random() - 1)) * Math.sin(2 * Math.PI * Math.random()), r * Math.cos(Math.acos(2 * Math.random() - 1)));
+
+    group.lookAt(new THREE.Vector3(0, h_pos, 0)); 
+    const baseRot = group.rotation.clone();
+
+    group.userData = { treePos, scatterPos, baseRot, isPhoto: true };
+    group.position.copy(treePos);
+    
+    photoMeshesRef.current.push(group);
+    mainGroupRef.current.add(group);
+  };
+
+  const handlePhotoClick = (cx: number, cy: number) => {
+      if (!containerRef.current || !cameraRef.current || !mainGroupRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const x = ((cx - rect.left) / rect.width) * 2 - 1;
+      const y = -((cy - rect.top) / rect.height) * 2 + 1;
+      raycasterRef.current.setFromCamera(new THREE.Vector2(x,y), cameraRef.current);
+      const intersects = raycasterRef.current.intersectObjects(photoMeshesRef.current, true);
+      if (intersects.length > 0) {
+          let targetObj = intersects[0].object;
+          while(targetObj.parent && targetObj.parent !== mainGroupRef.current) targetObj = targetObj.parent;
+          const index = photoMeshesRef.current.indexOf(targetObj);
+          if (index !== -1) {
+              zoomTargetIndexRef.current = index;
+              setAppState(AppState.ZOOM);
+          }
+      }
+  };
+
+  // --- EFFECTS ---
 
   useEffect(() => {
     appStateRef.current = appState;
@@ -217,9 +415,18 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                       }
                       
                       video.srcObject = stream;
-                      video.onloadedmetadata = () => {
-                          video.play().catch(e => console.error("Video play failed", e));
-                      };
+                      video.setAttribute('playsinline', 'true');
+                      video.muted = true;
+                      
+                      await new Promise<void>((resolve) => {
+                          video.onloadedmetadata = () => {
+                              video.play().then(() => resolve()).catch(e => {
+                                  console.error("Play failed", e);
+                                  setStatusText("请点击屏幕以启动摄像头");
+                                  resolve();
+                              });
+                          };
+                      });
                       
                       video.onloadeddata = () => {
                           setStatusText("AI Ready: 请举起一只手 👋");
@@ -262,6 +469,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     logicDataRef.current.dust = [];
     logicDataRef.current.fireworks = [];
     logicDataRef.current.textTargets = null;
+    logicDataRef.current.tyndallIndices = [];
     photoMeshesRef.current = [];
 
     const width = containerRef.current.clientWidth;
@@ -271,7 +479,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     const scene = new THREE.Scene();
     sceneRef.current = scene;
 
-    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
+    // CAMERA FIX: INCREASED FAR PLANE TO 5000 TO PREVENT DISAPPEARING
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 5000);
     camera.position.set(0, 0, 110);
     cameraRef.current = camera;
 
@@ -279,7 +488,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    renderer.toneMappingExposure = 0.9; // Adjusted brightness
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -312,9 +521,10 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
 
     const renderScene = new RenderPass(scene, camera);
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 1.5, 0.4, 0.85);
-    bloomPass.threshold = 0.3;
-    bloomPass.strength = 0.6;
-    bloomPass.radius = 0.5;
+    bloomPass.threshold = 0.55; // Higher threshold to reduce overall glow
+    bloomPass.strength = 0.4;   // Lower strength for subtler effect
+    bloomPass.radius = 0.8;     // Wider radius for atmospheric feel
+    bloomPassRef.current = bloomPass; // Save for dynamic updates
 
     const composer = new EffectComposer(renderer);
     composer.addPass(renderScene);
@@ -359,26 +569,25 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     };
 
     const createMaterialsAndMeshes = () => {
-        // OPTIMIZATION: Use Standard Material instead of Physical for performance
+        // OPTIMIZATION: Reduced emissive intensity significantly to avoid excessive glow
         const goldMat = new THREE.MeshStandardMaterial({ 
             color: 0xffaa00, 
             metalness: 1.0, 
             roughness: 0.2, 
             emissive: 0xaa5500, 
-            emissiveIntensity: 0.1 
+            emissiveIntensity: 0.05 
         });
-        goldMat.userData = { origEmissive: 0xaa5500, origEmissiveIntensity: 0.1 };
+        goldMat.userData = { origEmissive: 0xaa5500, origEmissiveIntensity: 0.05 };
 
         const silverMat = new THREE.MeshStandardMaterial({ 
             color: 0xeeeeee, 
             metalness: 0.9, 
             roughness: 0.2, 
             emissive: 0x222222, 
-            emissiveIntensity: 0.1 
+            emissiveIntensity: 0.05 
         });
-        silverMat.userData = { origEmissive: 0x222222, origEmissiveIntensity: 0.1 };
+        silverMat.userData = { origEmissive: 0x222222, origEmissiveIntensity: 0.05 };
 
-        // OPTIMIZATION: Use transparent standard material instead of transmission (glass)
         const gemMat = new THREE.MeshStandardMaterial({ 
             color: 0xff0044, 
             metalness: 0.1, 
@@ -386,9 +595,9 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             transparent: true,
             opacity: 0.8,
             emissive: 0x440011, 
-            emissiveIntensity: 0.3 
+            emissiveIntensity: 0.1 
         });
-        gemMat.userData = { origEmissive: 0x440011, origEmissiveIntensity: 0.3 };
+        gemMat.userData = { origEmissive: 0x440011, origEmissiveIntensity: 0.1 };
 
         const emeraldMat = new THREE.MeshStandardMaterial({ 
             color: 0x00aa55, 
@@ -397,9 +606,9 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             transparent: true,
             opacity: 0.8,
             emissive: 0x002211, 
-            emissiveIntensity: 0.2 
+            emissiveIntensity: 0.1 
         });
-        emeraldMat.userData = { origEmissive: 0x002211, origEmissiveIntensity: 0.2 };
+        emeraldMat.userData = { origEmissive: 0x002211, origEmissiveIntensity: 0.1 };
 
         const sphereGeo = new THREE.SphereGeometry(0.7, 12, 12); // Reduced segments
         const boxGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
@@ -439,6 +648,37 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const dustSystem = new THREE.Points(geo, new THREE.PointsMaterial({ color: 0xffffee, size: 0.6, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }));
         dustSystem.userData = { isDust: true };
         mainGroup.add(dustSystem);
+    };
+
+    // --- Tyndall Effect Light Beams System (Attached to Particles) ---
+    const createTyndallSystem = () => {
+        const beamCount = 120; // Number of gold particles that will emit beams
+        // Pick random gold particles
+        const indices = [];
+        const totalGold = CONFIG.goldCount;
+        for(let i=0; i<beamCount; i++) {
+            indices.push(Math.floor(Math.random() * totalGold));
+        }
+        logicDataRef.current.tyndallIndices = indices;
+
+        const beamGeo = new THREE.CylinderGeometry(0.1, 3.0, 80, 4, 1, true);
+        // Shift geometry so origin is at the bottom (0,0,0)
+        beamGeo.translate(0, 40, 0); 
+
+        const beamMat = new THREE.MeshBasicMaterial({
+            color: 0xFFF8DC, // Cornsilk/Gold-ish
+            transparent: true,
+            opacity: 0,
+            blending: THREE.AdditiveBlending,
+            side: THREE.DoubleSide,
+            depthWrite: false
+        });
+
+        const beams = new THREE.InstancedMesh(beamGeo, beamMat, beamCount);
+        beams.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        beams.name = 'tyndallBeams';
+        mainGroup.add(beams);
+        logicDataRef.current.tyndallBeams = beams;
     };
 
     const createStarField = () => {
@@ -516,36 +756,51 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
 
     const createTextTargets = () => {
         const canvas = document.createElement('canvas');
-        canvas.width = 400; canvas.height = 200; 
+        canvas.width = 1024; canvas.height = 512; 
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        const scanPixels = (text: string, font: string, offsetY: number) => {
-            ctx.clearRect(0, 0, 400, 200);
+        const scanPixels = (text: string, font: string, offsetY: number, scaleMultiplier: number = 0.4) => {
+            ctx.clearRect(0, 0, 1024, 512);
             ctx.fillStyle = '#FFFFFF';
             ctx.font = font;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(text, 200, 100);
+            ctx.fillText(text, 512, 256);
             
-            const imageData = ctx.getImageData(0, 0, 400, 200).data;
+            const imageData = ctx.getImageData(0, 0, 1024, 512).data;
             const points = [];
-            for (let y = 0; y < 200; y += 3) {
-                for (let x = 0; x < 400; x += 3) {
-                    if (imageData[(y * 400 + x) * 4 + 3] > 128) {
-                        points.push(new THREE.Vector3((x - 200) * 0.4, (100 - y) * 0.4 + offsetY, 25));
+            // Optimized scanning step
+            for (let y = 0; y < 512; y += 4) {
+                for (let x = 0; x < 1024; x += 4) {
+                    if (imageData[(y * 1024 + x) * 4 + 3] > 128) {
+                        points.push(new THREE.Vector3((x - 512) * scaleMultiplier, (256 - y) * scaleMultiplier + offsetY, 25));
                     }
                 }
             }
+            
+            // Shuffle points to ensure particles are distributed across the whole text even if count is low
+            for (let i = points.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [points[i], points[j]] = [points[j], points[i]];
+            }
+
             return points;
         };
-        const goldTargets = scanPixels("Merry Christmas!", "bold 48px Georgia", 20); 
-        const silverTargets = scanPixels("圣诞快乐！", "bold 60px 'Microsoft YaHei'", -20);
-        logicDataRef.current.textTargets = { gold: goldTargets, silver: silverTargets };
+
+        const runScan = () => {
+            // Apply Calligraphy fonts
+            const goldTargets = scanPixels("Merry Christmas!", "150px 'Great Vibes', cursive", 15, 0.4); 
+            const silverTargets = scanPixels("圣诞快乐！", "120px 'Ma Shan Zheng', cursive", -55, 0.4);
+            logicDataRef.current.textTargets = { gold: goldTargets, silver: silverTargets };
+        };
+
+        runScan();
     };
 
     createMaterialsAndMeshes();
     createDust();
+    createTyndallSystem(); // Changed from createLightBeams
     createStarField();
     createRibbonWithMorph();
     createTextTargets();
@@ -556,7 +811,6 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const video = videoRef.current;
         if (video.readyState < 2 || video.videoWidth === 0) return;
 
-        // Throttle prediction to ~10 FPS (100ms) to save CPU/GPU for rendering
         const now = Date.now();
         if (now - lastPredictionTimeRef.current < 100) return;
         lastPredictionTimeRef.current = now;
@@ -655,12 +909,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                             status += `✌️ Victory (${Math.floor(gestureStateRef.current.victoryTimer)}s)`;
                             gestureStateRef.current.victoryTimer += 0.1; // Faster tick due to lower FPS
                              if (gestureStateRef.current.victoryTimer > 2.0 && !isEpicSequenceRef.current) {
-                                 hasTriggeredEpicRef.current = true;
-                                 isEpicSequenceRef.current = true;
-                                 epicTimerRef.current = 0;
-                                 playWeWishYou();
-                                 setBlessingCount(prev => prev + 1);
-                                 rainbowStarModeRef.current = true;
+                                 triggerEpicSequence(); // USE CENTRALIZED TRIGGER
                                  gestureStateRef.current.victoryTimer = 0;
                             }
                         }
@@ -754,7 +1003,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                  mat.emissive.setHex(0xFFAA00);
                  mat.emissiveIntensity = 2.0 + Math.sin(timeRef.current * 5); 
              } else if (type === 'silver' || type === 'gem') {
-                 mat.color.setHex(0xD40000); 
+                 mat.color.setHex(0xD40000); // Red
                  mat.emissive.setHex(0xFF0000); 
                  mat.emissiveIntensity = 1.0 + Math.sin(timeRef.current * 8); 
              } else {
@@ -766,7 +1015,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         } else {
             mat.color.setHex(type === 'gold' ? 0xffaa00 : type === 'silver' ? 0xeeeeee : type === 'gem' ? 0xff0044 : 0x00aa55);
             mat.emissive.setHex(mesh.userData.origEmissive || 0x000000);
-            mat.emissiveIntensity = mesh.userData.origEmissiveIntensity || 0.1;
+            // Default reduced emissive for normal state
+            mat.emissiveIntensity = mesh.userData.origEmissiveIntensity || 0.05;
         }
 
         for (let i = 0; i < dataArray.length; i++) {
@@ -782,6 +1032,9 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                     target = textTargets.silver[i % textTargets.silver.length];
                 }
             }
+
+            // --- CRASH FIX: Ensure target is valid ---
+            if (!target) target = item.currentPos;
 
             if (repelPos && state === AppState.TREE && !isEpic) {
                 const localRepel = repelPos.clone().applyMatrix4(group.matrixWorld.clone().invert());
@@ -815,6 +1068,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const speedBoost = interactionRef.current.touches >= 3 ? 5.0 : 1.0;
         for(let i=0; i<logicDataRef.current.dust.length; i++) {
             const item = logicDataRef.current.dust[i];
+            
             if (state === AppState.TREE) {
                 item.currentPos.y += 0.05 * speedBoost;
                 if(item.currentPos.y > CONFIG.treeHeight/2) item.currentPos.y = -CONFIG.treeHeight/2;
@@ -908,8 +1162,9 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                      const cam = cameraRef.current;
                      const aspect = cam.aspect;
                      const vFOV = cam.fov * Math.PI / 180;
+                     // FIX: Increased width (90 -> 280) to ensure full text "Merry Christmas!" fits on screen
                      const targetDistH = 50 / Math.tan(vFOV / 2);
-                     const targetDistW = 90 / (aspect * Math.tan(vFOV / 2));
+                     const targetDistW = 280 / (aspect * Math.tan(vFOV / 2));
                      const targetZ = Math.max(targetDistH, targetDistW, 110);
                      cam.position.z = THREE.MathUtils.lerp(cam.position.z, targetZ, 0.05);
                 }
@@ -931,6 +1186,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const star = logicDataRef.current.star;
         if (star) {
             let target = state === AppState.TREE ? star.userData.treePos : star.userData.scatterPos;
+            
             star.position.lerp(target, 0.05);
             star.rotation.y += 0.01;
             if (rainbowStarModeRef.current) {
@@ -947,6 +1203,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     const updatePhotos = (state: AppState) => {
         photoMeshesRef.current.forEach((group, idx) => {
             let targetPos, targetScale = 1.0; 
+            
             if (state === AppState.ZOOM && idx === zoomTargetIndexRef.current) {
                 targetPos = mainGroup.worldToLocal(new THREE.Vector3(0, 0, 80));
                 targetScale = 3.5;
@@ -969,79 +1226,143 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     const animate = () => {
         requestRef.current = requestAnimationFrame(animate);
         timeRef.current += 0.016;
-        
-        predictWebcam();
-        
-        const state = appStateRef.current;
-        const group = mainGroup;
 
-        if (isHoldingStarRef.current && !isEpicSequenceRef.current) {
-            if (inputModeRef.current === 'touch' && starHoldStartTimeRef.current > 0) {
-                 const holdTime = Date.now() - starHoldStartTimeRef.current;
-                 const progress = Math.min(holdTime / 3000, 1.0);
-                 setHoldProgress(progress);
-                 if (progress >= 1.0 && !hasTriggeredEpicRef.current) {
-                    hasTriggeredEpicRef.current = true;
-                    isEpicSequenceRef.current = true;
-                    epicTimerRef.current = 0;
-                    playWeWishYou();
-                    setBlessingCount(prev => prev + 1);
-                    rainbowStarModeRef.current = true;
-                    setHoldProgress(0);
-                 }
+        // --- GLOBAL CRASH PROTECTION ---
+        try {
+            predictWebcam();
+            
+            const state = appStateRef.current;
+            const group = mainGroupRef.current;
+            if (!group) return; 
+
+            // -- New Feature: Nebula Rotation --
+            if (state === AppState.SCATTER) {
+                group.rotation.y += 0.005; // Auto-rotate slowly in scatter mode
             }
-        }
 
-        if (isEpicSequenceRef.current) {
-            epicTimerRef.current += 0.016;
-            const t = epicTimerRef.current;
-            if (group.rotation.y > Math.PI) group.rotation.y -= 2 * Math.PI;
-            if (group.rotation.y < -Math.PI) group.rotation.y += 2 * Math.PI;
-            group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, 0.05);
-            group.rotation.y = THREE.MathUtils.lerp(group.rotation.y, 0, 0.05);
-            group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, 0, 0.05);
-            rotationVelocityRef.current = 0;
-            if (t < 3.0) group.scale.setScalar(1.0 + Math.sin(t * Math.PI * 2) * 0.1);
-            else group.scale.setScalar(1.0);
-            if (t > 3.0 && t < 6.0 && Math.random() < 0.1) {
-                const warmColors = [0xFFD700, 0xFFA500, 0xFF4500];
-                const c = warmColors[Math.floor(Math.random()*warmColors.length)];
-                spawnFirework(c, 'snow');
+            // -- New Feature: Tyndall Beams attached to flashing particles --
+            const beams = logicDataRef.current.tyndallBeams;
+            const beamIndices = logicDataRef.current.tyndallIndices;
+            const goldParticles = logicDataRef.current.gold;
+            const { dummy, vec3A } = tempRef.current;
+
+            if (beams && beamIndices && goldParticles.length > 0) {
+                const isScatter = state === AppState.SCATTER;
+                beams.visible = isScatter; // Only visible in scatter mode
+                
+                if (isScatter) {
+                    for (let i = 0; i < beamIndices.length; i++) {
+                        const idx = beamIndices[i];
+                        if (idx < goldParticles.length) {
+                            const particle = goldParticles[idx];
+                            const pos = particle.currentPos;
+                            
+                            // Calculate "Flash" intensity for breathing effect
+                            // Use index offset to de-sync breathing
+                            const flashSpeed = 2.0;
+                            const flashOffset = idx * 0.1;
+                            const intensity = Math.sin(timeRef.current * flashSpeed + flashOffset);
+                            const scale = THREE.MathUtils.mapLinear(intensity, -1, 1, 0.5, 1.5);
+                            const opacity = THREE.MathUtils.mapLinear(intensity, -1, 1, 0.1, 0.6); // Pulse opacity
+
+                            dummy.position.copy(pos);
+                            // Point beam outwards from center (0,0,0)
+                            dummy.lookAt(0,0,0); // Point towards center
+                            dummy.rotateX(Math.PI); // Flip to point away
+                            
+                            dummy.scale.set(scale, scale, scale);
+                            dummy.updateMatrix();
+                            beams.setMatrixAt(i, dummy.matrix);
+                            
+                            // Note: Cannot easily set individual opacity on InstancedMesh without custom shader/attributes
+                            // So we modulate the whole mesh or just accept size modulation.
+                            // To improve, we just scale the Y axis (length) to simulate intensity.
+                            dummy.scale.set(1, scale * 2, 1); 
+                            dummy.updateMatrix();
+                            beams.setMatrixAt(i, dummy.matrix);
+                        }
+                    }
+                    beams.instanceMatrix.needsUpdate = true;
+                }
             }
-            if (t > 18.0) {
-                isEpicSequenceRef.current = false;
-                setAppState(AppState.TREE);
+
+            if (isHoldingStarRef.current && !isEpicSequenceRef.current) {
+                if (inputModeRef.current === 'touch' && starHoldStartTimeRef.current > 0) {
+                    const holdTime = Date.now() - starHoldStartTimeRef.current;
+                    const progress = Math.min(holdTime / 3000, 1.0);
+                    setHoldProgress(progress);
+                    if (progress >= 1.0 && !hasTriggeredEpicRef.current) {
+                        triggerEpicSequence(); // USE CENTRALIZED TRIGGER
+                    }
+                }
             }
-        }
 
-        if (state !== AppState.ZOOM && interactionRef.current.touches !== 2 && !isGoldModeRef.current && !isEpicSequenceRef.current && (inputModeRef.current === 'touch')) {
-            group.rotation.y += rotationVelocityRef.current;
-            rotationVelocityRef.current *= 0.95; 
-            if (settingsRef.current.rotationEnabled && Math.abs(rotationVelocityRef.current) < 0.0005 && state === AppState.TREE) {
-                group.rotation.y += 0.002;
+            if (isEpicSequenceRef.current) {
+                epicTimerRef.current += 0.016;
+                const t = epicTimerRef.current;
+                if (group.rotation.y > Math.PI) group.rotation.y -= 2 * Math.PI;
+                if (group.rotation.y < -Math.PI) group.rotation.y += 2 * Math.PI;
+                group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, 0.05);
+                group.rotation.y = THREE.MathUtils.lerp(group.rotation.y, 0, 0.05);
+                group.rotation.z = THREE.MathUtils.lerp(group.rotation.z, 0, 0.05);
+                rotationVelocityRef.current = 0;
+                if (t < 3.0) group.scale.setScalar(1.0 + Math.sin(t * Math.PI * 2) * 0.1);
+                else group.scale.setScalar(1.0);
+                if (t > 3.0 && t < 6.0 && Math.random() < 0.1) {
+                    const warmColors = [0xFFD700, 0xFFA500, 0xFF4500];
+                    const c = warmColors[Math.floor(Math.random()*warmColors.length)];
+                    spawnFirework(c, 'snow');
+                }
+                if (t > 18.0) {
+                    isEpicSequenceRef.current = false;
+                    setAppState(AppState.TREE);
+                }
             }
+
+            if (state !== AppState.ZOOM && state !== AppState.SCATTER && interactionRef.current.touches !== 2 && !isGoldModeRef.current && !isEpicSequenceRef.current && (inputModeRef.current === 'touch')) {
+                group.rotation.y += rotationVelocityRef.current;
+                rotationVelocityRef.current *= 0.95; 
+                if (settingsRef.current.rotationEnabled && Math.abs(rotationVelocityRef.current) < 0.0005 && state === AppState.TREE) {
+                    group.rotation.y += 0.002;
+                }
+            }
+            if (shakeIntensityRef.current > 0) {
+                // Apply shake to camera or root object
+                group.position.x = (Math.random() - 0.5) * shakeIntensityRef.current;
+                group.position.y = (Math.random() - 0.5) * shakeIntensityRef.current;
+                shakeIntensityRef.current *= 0.9; // Decay
+
+                // Visual Shockwave: Dynamic Bloom Strength based on Shake
+                if (bloomPassRef.current) {
+                    bloomPassRef.current.strength = 0.4 + shakeIntensityRef.current * 0.5;
+                    bloomPassRef.current.radius = 0.8 + shakeIntensityRef.current * 0.1;
+                }
+            } else {
+                group.position.set(0,0,0);
+                // Reset Bloom
+                if (bloomPassRef.current) {
+                    bloomPassRef.current.strength = THREE.MathUtils.lerp(bloomPassRef.current.strength, 0.4, 0.1);
+                    bloomPassRef.current.radius = THREE.MathUtils.lerp(bloomPassRef.current.radius, 0.8, 0.1);
+                }
+            }
+
+            if (interactionRef.current.touches === 4 && (Date.now() - interactionRef.current.startTime) > 500 && Math.random() < 0.1) spawnFirework(undefined, 'normal');
+
+            updateInstancedSystem(logicDataRef.current.gold, group, state, 'gold');
+            updateInstancedSystem(logicDataRef.current.silver, group, state, 'silver');
+            updateInstancedSystem(logicDataRef.current.gem, group, state, 'gem');
+            updateInstancedSystem(logicDataRef.current.emerald, group, state, 'emerald');
+            updateDustParticles(state);
+            updatePhotos(state);
+            updateRibbon(state);
+            updateStar(state);
+            updateFireworks();
+
+            composer.render();
+        } catch (error) {
+            console.error("Animation Loop Crash:", error);
+            // Optionally set text to error
         }
-        if (shakeIntensityRef.current > 0) {
-            group.position.x = (Math.random() - 0.5) * shakeIntensityRef.current;
-            group.position.y = (Math.random() - 0.5) * shakeIntensityRef.current;
-            shakeIntensityRef.current *= 0.9;
-        } else {
-            group.position.set(0,0,0);
-        }
-
-        if (interactionRef.current.touches === 4 && (Date.now() - interactionRef.current.startTime) > 500 && Math.random() < 0.1) spawnFirework(undefined, 'normal');
-
-        updateInstancedSystem(logicDataRef.current.gold, group, state, 'gold');
-        updateInstancedSystem(logicDataRef.current.silver, group, state, 'silver');
-        updateInstancedSystem(logicDataRef.current.gem, group, state, 'gem');
-        updateInstancedSystem(logicDataRef.current.emerald, group, state, 'emerald');
-        updateDustParticles(state);
-        updatePhotos(state);
-        updateRibbon(state);
-        updateStar(state);
-        updateFireworks();
-
-        composer.render();
     };
 
     animate();
@@ -1064,155 +1385,6 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         renderer.dispose();
     };
   }, []); 
-
-  const initAudio = () => {
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-    }
-    if (audioContextRef.current.state === 'suspended') {
-      audioContextRef.current.resume();
-    }
-  };
-
-  const playBellSound = () => {
-    if (!settingsRef.current.soundEnabled) return;
-    initAudio();
-    const ctx = audioContextRef.current;
-    if (!ctx) return;
-    const t = ctx.currentTime;
-    const partials = [1, 2, 3, 4.2];
-    const baseFreq = 880; 
-    partials.forEach((partial, i) => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.setValueAtTime(baseFreq * partial, t);
-        gain.gain.setValueAtTime(0, t);
-        gain.gain.linearRampToValueAtTime(0.1 / (i + 1), t + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.001, t + 1.5);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(t);
-        osc.stop(t + 1.5);
-    });
-  };
-
-  const playJingleBells = () => {
-    if (!settingsRef.current.soundEnabled) return;
-    initAudio();
-    const ctx = audioContextRef.current;
-    if (!ctx) return;
-    const notes = [
-      { f: 329.63, d: 0.2, t: 0 }, { f: 329.63, d: 0.2, t: 0.25 }, { f: 329.63, d: 0.4, t: 0.5 },
-      { f: 329.63, d: 0.2, t: 1.0 }, { f: 329.63, d: 0.2, t: 1.25 }, { f: 329.63, d: 0.4, t: 1.5 },
-      { f: 329.63, d: 0.2, t: 2.0 }, { f: 392.00, d: 0.2, t: 2.25 }, { f: 261.63, d: 0.2, t: 2.5 }, { f: 293.66, d: 0.2, t: 2.75 }, { f: 329.63, d: 0.8, t: 3.0 }
-    ];
-    notes.forEach(n => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.value = n.f;
-      const startTime = ctx.currentTime + n.t;
-      gain.gain.setValueAtTime(0, startTime);
-      gain.gain.linearRampToValueAtTime(0.3, startTime + 0.05);
-      gain.gain.exponentialRampToValueAtTime(0.01, startTime + n.d);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(startTime);
-      osc.stop(startTime + n.d);
-    });
-  };
-
-  const playWeWishYou = () => {
-    if (!settingsRef.current.soundEnabled) return;
-    initAudio();
-    const ctx = audioContextRef.current;
-    if (!ctx) return;
-    const melody = [
-      {f: 261.63, t:0, d:0.4}, {f: 349.23, t:0.4, d:0.4}, {f: 349.23, t:0.8, d:0.2}, {f: 392.00, t:1.0, d:0.2}, {f: 349.23, t:1.2, d:0.2}, {f: 329.63, t:1.4, d:0.2},
-      {f: 293.66, t:1.6, d:0.4}, {f: 293.66, t:2.0, d:0.4}, {f: 293.66, t:2.4, d:0.4}, {f: 392.00, t:2.8, d:0.4}, {f: 392.00, t:3.2, d:0.2}, {f: 440.00, t:3.4, d:0.2},
-      {f: 392.00, t:3.6, d:0.2}, {f: 349.23, t:3.8, d:0.2}, {f: 329.63, t:4.0, d:0.4}, {f: 261.63, t:4.4, d:0.4}, {f: 261.63, t:4.8, d:0.4},
-      {f: 440.00, t:5.2, d:0.4}, {f: 440.00, t:5.6, d:0.2}, {f: 493.88, t:5.8, d:0.2}, {f: 440.00, t:6.0, d:0.2}, {f: 392.00, t:6.2, d:0.2}, {f: 349.23, t:6.4, d:0.4},
-      {f: 293.66, t:6.8, d:0.4}, {f: 261.63, t:7.2, d:0.2}, {f: 261.63, t:7.4, d:0.2}, {f: 293.66, t:7.6, d:0.4}, {f: 392.00, t:8.0, d:0.4}, {f: 329.63, t:8.4, d:0.4},
-      {f: 349.23, t:8.8, d:1.5}
-    ];
-    melody.forEach(n => {
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'triangle';
-        osc.frequency.value = n.f;
-        const osc2 = ctx.createOscillator();
-        osc2.type = 'triangle';
-        osc2.frequency.value = n.f + 1.5;
-        osc2.connect(gain);
-        gain.gain.setValueAtTime(0, ctx.currentTime + n.t);
-        gain.gain.linearRampToValueAtTime(0.2, ctx.currentTime + n.t + 0.1);
-        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + n.t + n.d);
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start(ctx.currentTime + n.t);
-        osc.stop(ctx.currentTime + n.t + n.d);
-        osc2.start(ctx.currentTime + n.t);
-        osc2.stop(ctx.currentTime + n.t + n.d);
-    });
-  };
-
-  const addPhotoMesh = (img: HTMLImageElement) => {
-    if (!mainGroupRef.current) return;
-    const tex = new THREE.Texture(img);
-    tex.needsUpdate = true;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    
-    let w = 4, h = 4;
-    if(img.width > img.height) h = 4 * (img.height/img.width); 
-    else w = 4 * (img.width/img.height);
-    
-    const photoGeo = new THREE.PlaneGeometry(w, h);
-    const photoMat = new THREE.MeshStandardMaterial({ 
-        map: tex, 
-        side: THREE.DoubleSide,
-        roughness: 0.5,
-        metalness: 0,
-        emissive: 0x000000 
-    });
-    const photoMesh = new THREE.Mesh(photoGeo, photoMat);
-    photoMesh.position.z = 0.06; 
-    photoMesh.castShadow = true;
-    photoMesh.receiveShadow = true;
-
-    const frameGeo = new THREE.BoxGeometry(w + 0.5, h + 0.8, 0.1);
-    const frameMat = new THREE.MeshStandardMaterial({ 
-        color: 0xFFFFFF, 
-        roughness: 0.4, 
-        metalness: 0.1,
-        emissive: 0x222222, 
-        emissiveIntensity: 0.2
-    });
-    const frameMesh = new THREE.Mesh(frameGeo, frameMat);
-    frameMesh.castShadow = true;
-    frameMesh.receiveShadow = true;
-    
-    const group = new THREE.Group();
-    group.add(frameMesh);
-    group.add(photoMesh);
-    
-    const h_pos = (Math.random() - 0.5) * CONFIG.treeHeight;
-    const normH = (h_pos + CONFIG.treeHeight/2) / CONFIG.treeHeight;
-    const maxR = CONFIG.maxRadius * (1 - normH);
-    const r = maxR + 2 + Math.random() * 5; 
-    const theta = Math.random() * Math.PI * 2;
-    const treePos = new THREE.Vector3(r * Math.cos(theta), h_pos, r * Math.sin(theta));
-    const scatterPos = new THREE.Vector3(r * Math.sin(Math.acos(2 * Math.random() - 1)) * Math.cos(2 * Math.PI * Math.random()), r * Math.sin(Math.acos(2 * Math.random() - 1)) * Math.sin(2 * Math.PI * Math.random()), r * Math.cos(Math.acos(2 * Math.random() - 1)));
-
-    group.lookAt(new THREE.Vector3(0, h_pos, 0)); 
-    const baseRot = group.rotation.clone();
-
-    group.userData = { treePos, scatterPos, baseRot, isPhoto: true };
-    group.position.copy(treePos);
-    
-    photoMeshesRef.current.push(group);
-    mainGroupRef.current.add(group);
-  };
 
   const handleTouch = (e: any, type: string) => {
       if (inputModeRef.current === 'camera') return;
@@ -1336,24 +1508,6 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
              isGoldModeRef.current = true;
              goldModeTimerRef.current = 8.0; 
              playJingleBells();
-          }
-      }
-  };
-
-  const handlePhotoClick = (cx: number, cy: number) => {
-      if (!containerRef.current || !cameraRef.current || !mainGroupRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
-      const x = ((cx - rect.left) / rect.width) * 2 - 1;
-      const y = -((cy - rect.top) / rect.height) * 2 + 1;
-      raycasterRef.current.setFromCamera(new THREE.Vector2(x,y), cameraRef.current);
-      const intersects = raycasterRef.current.intersectObjects(photoMeshesRef.current, true);
-      if (intersects.length > 0) {
-          let targetObj = intersects[0].object;
-          while(targetObj.parent && targetObj.parent !== mainGroupRef.current) targetObj = targetObj.parent;
-          const index = photoMeshesRef.current.indexOf(targetObj);
-          if (index !== -1) {
-              zoomTargetIndexRef.current = index;
-              setAppState(AppState.ZOOM);
           }
       }
   };
