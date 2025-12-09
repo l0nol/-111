@@ -789,13 +789,23 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         };
 
         const runScan = () => {
-            // Apply Calligraphy fonts
+            // Updated to use Calligraphy fonts with fallbacks
+            // English: Great Vibes, Chinese: Ma Shan Zheng
+            // Default first to avoid empty/black screen if fonts not loaded
             const goldTargets = scanPixels("Merry Christmas!", "150px 'Great Vibes', cursive", 15, 0.4); 
             const silverTargets = scanPixels("圣诞快乐！", "120px 'Ma Shan Zheng', cursive", -55, 0.4);
             logicDataRef.current.textTargets = { gold: goldTargets, silver: silverTargets };
         };
 
+        // Run immediately
         runScan();
+
+        // Try to update again after a second to catch loaded fonts
+        // This prevents black screen/infinite wait
+        setTimeout(runScan, 1000);
+        if ('fonts' in document) {
+            document.fonts.ready.then(runScan).catch(() => {});
+        }
     };
 
     createMaterialsAndMeshes();
@@ -1158,15 +1168,27 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                 mat.emissive.setHex(0xFFD700);
                 mat.emissiveIntensity = 1.0 + Math.sin(time * 5.0) * 0.5;
                 mat.opacity = 0.9;
+                
+                // --- ADAPTIVE CAMERA ZOOM ---
                 if (cameraRef.current) {
                      const cam = cameraRef.current;
                      const aspect = cam.aspect;
                      const vFOV = cam.fov * Math.PI / 180;
-                     // FIX: Increased width (90 -> 280) to ensure full text "Merry Christmas!" fits on screen
-                     const targetDistH = 50 / Math.tan(vFOV / 2);
-                     const targetDistW = 280 / (aspect * Math.tan(vFOV / 2));
-                     const targetZ = Math.max(targetDistH, targetDistW, 110);
-                     cam.position.z = THREE.MathUtils.lerp(cam.position.z, targetZ, 0.05);
+                     
+                     // Text World Width ~ 400 units (1024 * 0.4)
+                     // Text World Height ~ 200 units (512 * 0.4)
+                     const requiredWidth = 450; // Padding added
+                     const requiredHeight = 220; // Padding added
+                     
+                     const distHeight = requiredHeight / (2 * Math.tan(vFOV / 2));
+                     const distWidth = requiredWidth / (2 * aspect * Math.tan(vFOV / 2));
+                     
+                     // Choose the max distance needed to fit both width and height
+                     const targetZ = Math.max(distHeight, distWidth, 120);
+                     
+                     // Smooth zoom with limits
+                     const clampedTarget = Math.min(targetZ, 3000); // Respect Far Plane
+                     cam.position.z = THREE.MathUtils.lerp(cam.position.z, clampedTarget, 0.05);
                 }
             } else {
                 if (ribbon.morphTargetInfluences) ribbon.morphTargetInfluences[0] = THREE.MathUtils.lerp(ribbon.morphTargetInfluences[0], 0, 0.1);
