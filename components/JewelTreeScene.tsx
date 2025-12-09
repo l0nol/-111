@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer';
@@ -661,14 +662,27 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         }
         logicDataRef.current.tyndallIndices = indices;
 
-        const beamGeo = new THREE.CylinderGeometry(0.1, 3.0, 80, 4, 1, true);
-        // Shift geometry so origin is at the bottom (0,0,0)
-        beamGeo.translate(0, 40, 0); 
+        // NEW GEOMETRY: Cone-like structure
+        // radiusTop=0.0 (sharp point), radiusBottom=3.5 (wide base), height=60, openEnded=true
+        const beamGeo = new THREE.CylinderGeometry(0.0, 3.5, 60, 8, 1, true);
+        // Translate so the tip (top) is at the origin (0,0,0) and it extends downwards
+        // Default Cylinder center is at 0. Range -30 to 30.
+        // We want range 0 to 60. Tip is at Top (+30).
+        // So translating by -30 moves center to -30, range -60 to 0. Tip is at 0.
+        beamGeo.translate(0, -30, 0);
+        // Rotate so it points along +Z or something standard?
+        // Default cylinder is aligned along Y. Tip is at +Y.
+        // We want to point it "outwards". We will handle rotation in animate loop.
+        // Let's rotate it 90 deg to align with Z for easier lookAt logic?
+        // Actually, just keep it along -Y (Tip at 0, Body at -Y).
+        // If we use lookAt(target), the Object's +Z axis points to target.
+        // So we should align the cone along +Z.
+        beamGeo.rotateX(-Math.PI / 2); // Rotate so it points along +Z. Tip at 0, Base at +Z.
 
         const beamMat = new THREE.MeshBasicMaterial({
             color: 0xFFF8DC, // Cornsilk/Gold-ish
             transparent: true,
-            opacity: 0,
+            opacity: 0.15, // Very Low opacity for volumetric accumulation
             blending: THREE.AdditiveBlending,
             side: THREE.DoubleSide,
             depthWrite: false
@@ -1266,7 +1280,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             const beams = logicDataRef.current.tyndallBeams;
             const beamIndices = logicDataRef.current.tyndallIndices;
             const goldParticles = logicDataRef.current.gold;
-            const { dummy, vec3A } = tempRef.current;
+            const { dummy } = tempRef.current;
 
             if (beams && beamIndices && goldParticles.length > 0) {
                 const isScatter = state === AppState.SCATTER;
@@ -1284,22 +1298,22 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
                             const flashSpeed = 2.0;
                             const flashOffset = idx * 0.1;
                             const intensity = Math.sin(timeRef.current * flashSpeed + flashOffset);
-                            const scale = THREE.MathUtils.mapLinear(intensity, -1, 1, 0.5, 1.5);
-                            const opacity = THREE.MathUtils.mapLinear(intensity, -1, 1, 0.1, 0.6); // Pulse opacity
-
+                            // Breathing Scale (width modulation)
+                            const scale = THREE.MathUtils.mapLinear(intensity, -1, 1, 0.2, 1.8);
+                            
                             dummy.position.copy(pos);
                             // Point beam outwards from center (0,0,0)
-                            dummy.lookAt(0,0,0); // Point towards center
-                            dummy.rotateX(Math.PI); // Flip to point away
-                            
-                            dummy.scale.set(scale, scale, scale);
-                            dummy.updateMatrix();
-                            beams.setMatrixAt(i, dummy.matrix);
-                            
-                            // Note: Cannot easily set individual opacity on InstancedMesh without custom shader/attributes
-                            // So we modulate the whole mesh or just accept size modulation.
-                            // To improve, we just scale the Y axis (length) to simulate intensity.
-                            dummy.scale.set(1, scale * 2, 1); 
+                            // 1. Look at center
+                            dummy.lookAt(0,0,0);
+                            // 2. Rotate so the cone points AWAY from center.
+                            // The cone geometry is defined pointing along +Z (rotateX(-PI/2) was applied to default cylinder)
+                            // LookAt aligns +Z to target (center).
+                            // So currently +Z points to center. We want +Z to point away.
+                            // Rotate 180 degrees around Y or X.
+                            dummy.rotateY(Math.PI);
+
+                            // Apply breathing scale to width (X/Y local) but keep length (Z local) constant-ish
+                            dummy.scale.set(scale, scale, 1); 
                             dummy.updateMatrix();
                             beams.setMatrixAt(i, dummy.matrix);
                         }
