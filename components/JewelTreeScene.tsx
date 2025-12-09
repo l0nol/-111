@@ -14,6 +14,8 @@ const CONFIG = {
   silverCount: 1500,   
   gemCount: 500,      
   emeraldCount: 500,  
+  trunkCount: 800,    // New: Trunk particles
+  grassCount: 3000,   // New: Blue grass particles
   dustCount: 600,     
   treeHeight: 75,
   maxRadius: 30
@@ -72,11 +74,13 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     silver: [] as any[],
     gem: [] as any[],
     emerald: [] as any[],
+    trunk: [] as any[], // New
+    grass: [] as any[], // New
     dust: [] as any[],
     star: null as THREE.Mesh | null,
     ribbon: null as THREE.Mesh | null,
-    tyndallBeams: null as THREE.InstancedMesh | null, // Dynamic beams
-    tyndallIndices: [] as number[], // Indices of gold particles that emit beams
+    tyndallBeams: null as THREE.InstancedMesh | null, 
+    tyndallIndices: [] as number[], 
     fireworks: [] as any[],
     textTargets: null as { gold: THREE.Vector3[], silver: THREE.Vector3[] } | null
   });
@@ -467,6 +471,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
     logicDataRef.current.silver = [];
     logicDataRef.current.gem = [];
     logicDataRef.current.emerald = [];
+    logicDataRef.current.trunk = [];
+    logicDataRef.current.grass = [];
     logicDataRef.current.dust = [];
     logicDataRef.current.fireworks = [];
     logicDataRef.current.textTargets = null;
@@ -541,7 +547,14 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         return new THREE.Vector3(r * Math.sin(phi) * Math.cos(theta), r * Math.sin(phi) * Math.sin(theta), r * Math.cos(phi));
     };
 
-    const createInstancedMesh = (geo: THREE.BufferGeometry, mat: THREE.Material, count: number, dataArray: any[], name: string) => {
+    const createInstancedMesh = (
+        geo: THREE.BufferGeometry, 
+        mat: THREE.Material, 
+        count: number, 
+        dataArray: any[], 
+        name: string,
+        positionGen?: (i: number) => { treePos: THREE.Vector3, scatterPos: THREE.Vector3 }
+    ) => {
         const mesh = new THREE.InstancedMesh(geo, mat, count);
         mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
         mesh.castShadow = true;
@@ -550,13 +563,22 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         mainGroup.add(mesh);
         
         for (let i = 0; i < count; i++) {
-            const h = Math.random() * CONFIG.treeHeight - CONFIG.treeHeight/2;
-            const normH = (h + CONFIG.treeHeight/2) / CONFIG.treeHeight;
-            const rMax = CONFIG.maxRadius * (1 - normH);
-            const r = Math.sqrt(Math.random()) * rMax; 
-            const theta = Math.random() * Math.PI * 2;
-            const treePos = new THREE.Vector3(r * Math.cos(theta), h, r * Math.sin(theta));
-            const scatterPos = randomSpherePoint(40 + Math.random()*40);
+            let treePos, scatterPos;
+            
+            if (positionGen) {
+                const pos = positionGen(i);
+                treePos = pos.treePos;
+                scatterPos = pos.scatterPos;
+            } else {
+                // Default Tree Cone Logic
+                const h = Math.random() * CONFIG.treeHeight - CONFIG.treeHeight/2;
+                const normH = (h + CONFIG.treeHeight/2) / CONFIG.treeHeight;
+                const rMax = CONFIG.maxRadius * (1 - normH);
+                const r = Math.sqrt(Math.random()) * rMax; 
+                const theta = Math.random() * Math.PI * 2;
+                treePos = new THREE.Vector3(r * Math.cos(theta), h, r * Math.sin(theta));
+                scatterPos = randomSpherePoint(40 + Math.random()*40);
+            }
 
             dataArray.push({
                 treePos: treePos,
@@ -611,15 +633,59 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         });
         emeraldMat.userData = { origEmissive: 0x002211, origEmissiveIntensity: 0.1 };
 
+        // New Materials for Trunk and Grass
+        const trunkMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            roughness: 0.8,
+            metalness: 0.1,
+            emissive: 0x444444,
+            emissiveIntensity: 0.1
+        });
+        trunkMat.userData = { origEmissive: 0x444444, origEmissiveIntensity: 0.1 };
+
+        const grassMat = new THREE.MeshStandardMaterial({
+            color: 0x0088ff,
+            roughness: 0.4,
+            metalness: 0.5,
+            emissive: 0x004488,
+            emissiveIntensity: 0.3
+        });
+        grassMat.userData = { origEmissive: 0x004488, origEmissiveIntensity: 0.3 };
+
         const sphereGeo = new THREE.SphereGeometry(0.7, 12, 12); // Reduced segments
         const boxGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
         const diamondGeo = new THREE.OctahedronGeometry(0.8, 0);
         const coneGeo = new THREE.ConeGeometry(0.5, 1.2, 6); // Reduced segments
+        const smallCubeGeo = new THREE.BoxGeometry(0.6, 0.6, 0.6); // For Trunk
+        const tinyConeGeo = new THREE.ConeGeometry(0.3, 0.8, 4); // For Grass
 
         createInstancedMesh(sphereGeo, goldMat, CONFIG.goldCount, logicDataRef.current.gold, 'gold');
         createInstancedMesh(boxGeo, silverMat, CONFIG.silverCount, logicDataRef.current.silver, 'silver');
         createInstancedMesh(diamondGeo, gemMat, CONFIG.gemCount, logicDataRef.current.gem, 'gem');
         createInstancedMesh(coneGeo, emeraldMat, CONFIG.emeraldCount, logicDataRef.current.emerald, 'emerald');
+
+        // Trunk: Cylindrical distribution up the center
+        createInstancedMesh(smallCubeGeo, trunkMat, CONFIG.trunkCount, logicDataRef.current.trunk, 'trunk', () => {
+            const h = Math.random() * CONFIG.treeHeight - CONFIG.treeHeight/2;
+            const r = Math.random() * 2.0; // Narrow core
+            const theta = Math.random() * Math.PI * 2;
+            return {
+                treePos: new THREE.Vector3(r * Math.cos(theta), h, r * Math.sin(theta)),
+                scatterPos: randomSpherePoint(30)
+            };
+        });
+
+        // Grass: Flat distribution at base
+        createInstancedMesh(tinyConeGeo, grassMat, CONFIG.grassCount, logicDataRef.current.grass, 'grass', () => {
+            const rMax = CONFIG.maxRadius * 1.5;
+            const r = Math.sqrt(Math.random()) * rMax;
+            const theta = Math.random() * Math.PI * 2;
+            const h = -CONFIG.treeHeight/2 - 2 + Math.random() * 2; // Bottom layer
+            return {
+                treePos: new THREE.Vector3(r * Math.cos(theta), h, r * Math.sin(theta)),
+                scatterPos: randomSpherePoint(50)
+            };
+        });
 
         const star = new THREE.Mesh(
             new THREE.OctahedronGeometry(3.0, 0), 
@@ -1021,7 +1087,10 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
         const formingText = isEpic && epicTime > 4.0 && epicTime < 16.0;
         const textTargets = logicDataRef.current.textTargets;
         
-        if (formingText) {
+        // Text formation logic: only specific types participate to keep text clean
+        const participatesInText = (type === 'gold' || type === 'silver' || type === 'gem');
+
+        if (formingText && participatesInText) {
              if (type === 'gold') {
                  mat.color.setHex(0xFFD700); 
                  mat.emissive.setHex(0xFFAA00);
@@ -1037,7 +1106,11 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             mat.emissive.setHex(0xFFAA00);
             mat.emissiveIntensity = 2.0;
         } else {
-            mat.color.setHex(type === 'gold' ? 0xffaa00 : type === 'silver' ? 0xeeeeee : type === 'gem' ? 0xff0044 : 0x00aa55);
+            // Restore original colors
+            if (type === 'trunk') mat.color.setHex(0xffffff);
+            else if (type === 'grass') mat.color.setHex(0x0088ff);
+            else mat.color.setHex(type === 'gold' ? 0xffaa00 : type === 'silver' ? 0xeeeeee : type === 'gem' ? 0xff0044 : 0x00aa55);
+            
             mat.emissive.setHex(mesh.userData.origEmissive || 0x000000);
             // Default reduced emissive for normal state
             mat.emissiveIntensity = mesh.userData.origEmissiveIntensity || 0.05;
@@ -1048,7 +1121,7 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             let target = state === AppState.TREE ? item.treePos : item.scatterPos;
             if (state === AppState.ZOOM) target = item.scatterPos;
 
-            if (formingText && textTargets) {
+            if (formingText && textTargets && participatesInText) {
                 if (type === 'gold' && textTargets.gold.length > 0) {
                     target = textTargets.gold[i % textTargets.gold.length];
                 } 
@@ -1388,6 +1461,8 @@ const JewelTreeScene: React.FC<JewelTreeSceneProps> = ({
             updateInstancedSystem(logicDataRef.current.silver, group, state, 'silver');
             updateInstancedSystem(logicDataRef.current.gem, group, state, 'gem');
             updateInstancedSystem(logicDataRef.current.emerald, group, state, 'emerald');
+            updateInstancedSystem(logicDataRef.current.trunk, group, state, 'trunk'); // Update trunk
+            updateInstancedSystem(logicDataRef.current.grass, group, state, 'grass'); // Update grass
             updateDustParticles(state);
             updatePhotos(state);
             updateRibbon(state);
